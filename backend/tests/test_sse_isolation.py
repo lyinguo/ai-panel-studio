@@ -8,8 +8,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
-from tests.conftest import AsyncMock
-
 import pytest
 
 
@@ -45,6 +43,11 @@ class TestEventIsolation:
             return asyncio.Queue()
 
         bus.subscribe = MagicMock(side_effect=mock_subscribe)
+
+        # 预注册两个讨论的订阅，使 subscriptions 字典非空
+        bus.subscribe(1)
+        bus.subscribe(2)
+
         return bus, queue_1, queue_2, subscriptions
 
     @pytest.mark.asyncio
@@ -66,7 +69,7 @@ class TestEventIsolation:
             if target_queue is not None:
                 await target_queue.put(event)
 
-        bus.publish = AsyncMock(side_effect=mock_publish)
+        bus.publish = mock_publish
 
         # 向讨论1发布 3 个事件
         events_for_disc_1 = [
@@ -95,7 +98,7 @@ class TestEventIsolation:
             if target_queue is not None:
                 await target_queue.put(event)
 
-        bus.publish = AsyncMock(side_effect=mock_publish)
+        bus.publish = mock_publish
 
         # 向讨论2发布事件
         await bus.publish(
@@ -121,7 +124,7 @@ class TestEventIsolation:
             if target_queue is not None:
                 await target_queue.put(event)
 
-        bus.publish = AsyncMock(side_effect=mock_publish)
+        bus.publish = mock_publish
 
         # 同时向两个讨论发布相同类型事件
         await bus.publish(
@@ -168,7 +171,7 @@ class TestEventOrdering:
         async def mock_publish(discussion_id: int, event: dict):
             await queue.put(event)
 
-        bus.publish = AsyncMock(side_effect=mock_publish)
+        bus.publish = mock_publish
 
         # 按顺序发布 5 个事件
         expected_order = ["evt_a", "evt_b", "evt_c", "evt_d", "evt_e"]
@@ -211,7 +214,7 @@ class TestMultiDiscussionIsolation:
         async def mock_publish(discussion_id: int, event: dict):
             await queues[discussion_id].put(event)
 
-        bus.publish = AsyncMock(side_effect=mock_publish)
+        bus.publish = mock_publish
 
         # 向每个讨论发布唯一标记的事件
         markers = {1: "from_disc_1", 2: "from_disc_2", 3: "from_disc_3"}

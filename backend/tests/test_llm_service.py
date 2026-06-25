@@ -250,7 +250,7 @@ class TestParticipantBoundaries:
         from app.services.llm_service import LlmService
 
         MOCK = [
-            {"role": "host", "name": f"Host", "title": "T", "stance": f"S{i}", "color_code": f"#{i:06X}", "order": 0}
+            {"role": "host", "name": "Host", "title": "T", "stance": "S0", "color_code": "#4A90D9", "order": 0}
         ]
         MOCK += [
             {"role": "expert", "name": f"E{i}", "title": "T", "stance": f"S{i}", "color_code": f"#{i+100:06X}", "order": i}

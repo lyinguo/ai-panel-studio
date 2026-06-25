@@ -76,7 +76,7 @@ class TestSpeakerSelectionIsNotRoundRobin:
 
         last_id = context.get("last_speaker_id")
         if last_id is None:
-            return participants[0]
+            return participants[0]["id"]
 
         ids = [p["id"] for p in participants]
         last_index = ids.index(last_id)
@@ -125,12 +125,15 @@ class TestSpeakerSelectionIsNotRoundRobin:
         with patch.object(
             engine, "select_next_speaker", side_effect=self._mock_random_selection
         ) as mock_method:
-            for _ in range(30):
+            last_speaker = None
+            for i in range(30):
+                context = {"last_speaker_id": last_speaker, "round": i}
                 speaker = await engine.select_next_speaker(
                     participants=self.PARTICIPANTS,
-                    context={"last_speaker_id": None, "round": 0},
+                    context=context,
                 )
                 first_speakers.add(speaker)
+                last_speaker = speaker
 
             # 30 轮中如果只有主持人发言过，说明设计有问题
             assert len(first_speakers) > 1, (
