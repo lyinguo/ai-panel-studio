@@ -1,105 +1,112 @@
 import { create } from "zustand";
-import { PARTICIPANTS, MOCK_EVENTS } from "../data/mock";
 
-const initialStatuses = {};
-PARTICIPANTS.forEach((p) => {
-  initialStatuses[p.id] = "idle";
-});
+const defaultStatuses = {};
 
 const useStudioStore = create((set, get) => ({
-  // ── 状态 ──
-  participants: PARTICIPANTS,
+  // ── 核心状态 ──
+  discussionId: null,
+  participants: [],
   messages: [],
+  typingMessage: null, // { participant_id, participant_name, role, title, color_code, content }
   consensus: { agreements: [], divergences: [] },
-  guestStatuses: initialStatuses,
+  guestStatuses: {},
   discussionStatus: "idle", // idle | in_progress | completed
-  round: 0,
-  activeSpeakerId: null,
+  topic: "",
+  expertCount: 4,
 
-  // ── 操作 ──
+  // ── SSE 驱动操作 ──
 
-  /** 添加一条消息 */
+  setDiscussionId: (id) => set({ discussionId: id }),
+
+  setTopic: (topic) => set({ topic }),
+
+  setExpertCount: (count) => set({ expertCount: count }),
+
+  setParticipants: (participants) => {
+    const statuses = {};
+    participants.forEach((p) => {
+      statuses[p.id] = "idle";
+    });
+    set({ participants, guestStatuses: statuses, messages: [], typingMessage: null });
+  },
+
+  setDiscussionStatus: (status) => set({ discussionStatus: status }),
+
+  /** 更新嘉宾实时状态 */
+  updateGuestStatus: (participantId, status) =>
+    set((state) => ({
+      guestStatuses: { ...state.guestStatuses, [participantId]: status },
+      activeSpeakerId: status === "speaking" ? participantId : state.activeSpeakerId,
+    })),
+
+  /** 追加 typing 消息内容 */
+  updateTypingContent: (data) =>
+    set((state) => {
+      const participant = state.participants.find((p) => p.id === data.participant_id);
+      if (!participant) return state;
+
+      const existing = state.typingMessage;
+      if (existing && existing.participant_id === data.participant_id) {
+        return {
+          typingMessage: {
+            ...existing,
+            content: existing.content + data.content,
+          },
+        };
+      }
+      return {
+        typingMessage: {
+          participant_id: participant.id,
+          participant_name: participant.name,
+          role: participant.role,
+          title: participant.title,
+          color_code: participant.color_code,
+          content: data.content || "",
+        },
+      };
+    }),
+
+  /** 完成一条消息（is_final=true），移入 messages 数组 */
+  finalizeTyping: (data) =>
+    set((state) => {
+      const tm = state.typingMessage;
+      if (!tm) return state;
+
+      const newMsg = {
+        id: data.message_id || Date.now(),
+        participant_id: tm.participant_id,
+        participant_name: tm.participant_name,
+        role: tm.role,
+        title: tm.title,
+        content: tm.content,
+        color_code: tm.color_code,
+        created_at: new Date().toISOString(),
+      };
+
+      return {
+        messages: [...state.messages, newMsg],
+        typingMessage: null,
+      };
+    }),
+
+  /** 更新共识 */
+  updateConsensus: (consensus) => set({ consensus: { ...consensus } }),
+
+  /** 添加一条完整消息（模拟模式使用） */
   addMessage: (msg) =>
     set((state) => ({
       messages: [...state.messages, { id: Date.now(), ...msg }],
     })),
 
-  /** 更新参与者状态 */
-  updateGuestStatus: (participantId, status) =>
-    set((state) => ({
-      guestStatuses: { ...state.guestStatuses, [participantId]: status },
-      activeSpeakerId:
-        status === "speaking" ? participantId : state.activeSpeakerId,
-    })),
-
-  /** 更新共识 */
-  updateConsensus: (consensus) =>
-    set({ consensus: { ...consensus } }),
-
-  /** 设置讨论状态 */
-  setDiscussionStatus: (status) => set({ discussionStatus: status }),
-
-  /** 设置当前轮次 */
-  setRound: (round) => set({ round }),
-
-  /** 启动模拟讨论（播放 Mock 事件序列） */
-  startDiscussion: () => {
-    const state = get();
-    if (state.discussionStatus === "in_progress") return;
-
-    set({ discussionStatus: "in_progress", messages: [], consensus: { agreements: [], divergences: [] } });
-
-    let totalDelay = 0;
-    let msgAccum = "";
-
-    MOCK_EVENTS.forEach((evt) => {
-      totalDelay += evt.delay;
-
-      setTimeout(() => {
-        const store = get();
-
-        if (evt.type === "guest_status_change") {
-          store.updateGuestStatus(
-            evt.data.participant_id,
-            evt.data.status
-          );
-        } else if (evt.type === "message_chunk" && evt.data.is_final) {
-          const participant = store.participants.find(
-            (p) => p.id === evt.data.participant_id
-          );
-          if (participant) {
-            store.addMessage({
-              participant_id: evt.data.participant_id,
-              participant_name: participant.name,
-              role: participant.role,
-              title: participant.title,
-              content: evt.data.content,
-              color_code: participant.color_code,
-              created_at: evt.data.timestamp || new Date().toISOString(),
-            });
-          }
-        } else if (evt.type === "consensus_update") {
-          store.updateConsensus(evt.data);
-        }
-      }, totalDelay);
-    });
-
-    // 最后标记讨论结束
-    const finalDelay = totalDelay + 1500;
-    setTimeout(() => {
-      set({ discussionStatus: "completed" });
-    }, finalDelay);
-  },
-
-  /** 重置讨论 */
+  /** 重置 */
   resetDiscussion: () =>
     set({
+      discussionId: null,
       messages: [],
+      typingMessage: null,
       consensus: { agreements: [], divergences: [] },
-      guestStatuses: initialStatuses,
+      guestStatuses: {},
       discussionStatus: "idle",
-      round: 0,
-      activeSpeakerId: null,
     }),
 }));
 
