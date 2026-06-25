@@ -1,5 +1,8 @@
+import Studio from "./pages/Studio";
+import "./App.css";
+
 function App() {
-  return <div>AI Panel Studio</div>;
+  return <Studio />;
 }
 
 export default App;
