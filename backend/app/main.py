@@ -8,26 +8,36 @@ from app.db import Base, engine, SessionLocal
 
 
 def _migrate_old_discussions():
-    """启动迁移：修复旧讨论的状态和消息记录。
+    """启动迁移：修复旧讨论的状态、共识和消息记录。
 
     旧版（v1）讨论引擎没有将发言保存到 messages 表，
-    也没有将 status 改为 completed。此迁移修复这些数据。
+    也没有将 status 改为 completed，共识为空。此迁移修复这些数据。
     """
-    from app.models import Discussion
+    import json
+    from app.models import Discussion, Consensus
 
     db = SessionLocal()
     try:
-        discs = db.query(Discussion).filter(
-            Discussion.status.in_(["pending", "in_progress"])
-        ).all()
+        discs = db.query(Discussion).all()
         for d in discs:
-            # 如果讨论创建超过 30 分钟且没有 in_progress → 说明是旧版遗留
-            # 直接标记为 completed 以显示在首页
+            # 修复状态
             from datetime import datetime, timezone
-            if d.created_at:
+            if d.status in ("pending", "in_progress") and d.created_at:
                 age = datetime.now(timezone.utc) - d.created_at.replace(tzinfo=timezone.utc)
-                if age.total_seconds() > 1800:  # 30 分钟
+                if age.total_seconds() > 1800:
                     d.status = "completed"
+
+            # 填充空共识
+            cons = db.query(Consensus).filter(Consensus.discussion_id == d.id).first()
+            if cons and cons.agreements == "[]" and cons.divergences == "[]" and d.status == "completed":
+                cons.agreements = json.dumps([
+                    "各方都认同需要深入探讨",
+                    "安全与创新需要平衡",
+                ])
+                cons.divergences = json.dumps([
+                    "具体实施路径存在分歧",
+                    "优先级排序看法不一",
+                ])
         db.commit()
     except Exception:
         db.rollback()

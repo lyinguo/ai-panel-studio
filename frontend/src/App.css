@@ -560,6 +560,18 @@ body {
   color: #fca5a5;
 }
 
+.consensus--done {
+  border-color: var(--accent-blue);
+}
+
+.consensus__empty-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 20px 10px;
+  line-height: 1.6;
+}
+
 /* ════════════════════════════════════════════════
    底部控制栏
    ════════════════════════════════════════════════ */
@@ -1009,6 +1021,57 @@ body {
 }
 .lobby__btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(59,130,246,0.4); }
 .lobby__btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 候补选择 */
+.lobby__hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.lobby__card--selectable {
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.lobby__card--selectable:hover {
+  border-color: var(--accent-blue);
+}
+.lobby__card--selected {
+  background: var(--bg-surface);
+  opacity: 1;
+}
+.lobby__card--unselected {
+  opacity: 0.5;
+}
+.lobby__card--unselected:hover {
+  opacity: 0.8;
+}
+
+.lobby__checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  flex-shrink: 0;
+}
+
+.lobby__checkmark {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  transition: all 0.2s;
+  color: #fff;
+}
+
+.lobby__checkmark--on {
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.3);
+}
 
 .lobby__btn-ghost {
   background: transparent;

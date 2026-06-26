@@ -23,6 +23,10 @@ class CreateDiscussionResponse(BaseModel):
     participants: list[ParticipantResponse]
 
 
+class StartDiscussionRequest(BaseModel):
+    participant_ids: list[int] | None = None
+
+
 class DiscussionListItem(BaseModel):
     id: int
     topic: str
@@ -39,6 +43,10 @@ class MessageResponse(BaseModel):
     content: str
     color_code: str
     created_at: str
+
+
+class StartDiscussionRequest(BaseModel):
+    participant_ids: list[int] | None = None  # 用户确认保留的参与者 ID 列表
 
 
 class ErrorResponse(BaseModel):

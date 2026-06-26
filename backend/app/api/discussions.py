@@ -27,6 +27,7 @@ from app.schemas.api import (
     ErrorResponse,
     MessageResponse,
     ParticipantResponse,
+    StartDiscussionRequest,
 )
 from app.services.discussion_engine import DiscussionEngine
 from app.services.event_bus import EventBus
@@ -67,15 +68,15 @@ async def create_discussion(
     db.commit()
     db.refresh(discussion)
 
-    # 2. 调用 LLM 生成参与者
+    # 2. 调用 LLM 生成参与者（多生成 2 位供前端筛选替换）
+    candidates_count = body.expert_count + 2
     try:
         participants_data = await LlmService.generate_participants(
             topic=body.topic,
-            expert_count=body.expert_count,
+            expert_count=candidates_count,
         )
     except Exception:
-        # LLM 不可用时使用兜底方案
-        participants_data = LlmService._fallback_participants(body.expert_count)
+        participants_data = LlmService._fallback_participants(candidates_count)
 
     # 3. 持久化参与者
     participant_responses = []
@@ -134,20 +135,37 @@ async def create_discussion(
 )
 async def start_discussion(
     discussion_id: int,
+    body: StartDiscussionRequest | None = None,
     db: Session = Depends(get_db),
 ):
-    """用户确认专家阵容后，启动讨论并打开 SSE 流。"""
+    """用户确认专家阵容后，启动讨论并打开 SSE 流。
+
+    可选 body.participant_ids: 用户选中的参与者 ID 列表。
+    未提供的参与者将从阵容中移除（未被选中的候补专家）。
+    """
+    from app.models import Participant as ParticipantModel
+
     discussion = db.query(Discussion).filter(Discussion.id == discussion_id).first()
     if not discussion:
         raise HTTPException(status_code=404, detail="讨论不存在")
     if discussion.status != "pending":
         raise HTTPException(status_code=409, detail="讨论已开始或已结束")
 
+    # 如果用户指定了参与者 ID，删除未被选中的候补专家
+    if body and body.participant_ids:
+        selected = set(body.participant_ids)
+        for p in list(discussion.participants):
+            if p.id not in selected:
+                db.delete(p)
+        db.commit()
+
     # 更新状态
     discussion.status = "in_progress"
     db.commit()
+    db.refresh(discussion)
 
-    # 获取参与者数据
+    # 获取参与者数据（按 order 排序）
+    all_participants = sorted(discussion.participants, key=lambda p: p.order)
     participants_list = [
         {
             "id": p.id,
@@ -158,7 +176,7 @@ async def start_discussion(
             "color_code": p.color_code,
             "order": p.order,
         }
-        for p in discussion.participants
+        for p in all_participants
     ]
 
     db.close()
@@ -355,20 +373,30 @@ async def _run_discussion_in_background(
         finally:
             db.close()
 
-    # 回调：更新讨论状态 + 保存共识
-    async def on_complete(final_consensus: dict | None = None):
+    # 回调：保存共识到数据库（每次共识提炼时调用）
+    async def on_consensus(agreements: list[str], divergences: list[str]):
+        db = SessionLocal()
+        try:
+            cons = db.query(ConsensusModel).filter(
+                ConsensusModel.discussion_id == discussion_id
+            ).first()
+            if cons:
+                cons.agreements = json.dumps(agreements)
+                cons.divergences = json.dumps(divergences)
+                cons.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
+    # 回调：更新讨论状态为 completed
+    async def on_complete():
         db = SessionLocal()
         try:
             disc = db.query(DiscussionModel).filter(DiscussionModel.id == discussion_id).first()
             if disc:
                 disc.status = "completed"
-            if final_consensus:
-                cons = db.query(ConsensusModel).filter(
-                    ConsensusModel.discussion_id == discussion_id
-                ).first()
-                if cons:
-                    cons.agreements = json.dumps(final_consensus.get("agreements", []))
-                    cons.divergences = json.dumps(final_consensus.get("divergences", []))
             db.commit()
         except Exception:
             db.rollback()
@@ -382,5 +410,6 @@ async def _run_discussion_in_background(
         event_bus=event_bus,
         max_rounds=15,
         on_message=on_message,
+        on_consensus=on_consensus,
         on_complete=on_complete,
     )

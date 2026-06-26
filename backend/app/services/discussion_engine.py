@@ -113,6 +113,7 @@ class DiscussionEngine:
         event_bus: EventBus,
         max_rounds: int = 10,
         on_message: callable = None,
+        on_consensus: callable = None,
         on_complete: callable = None,
     ) -> None:
         await event_bus.publish(discussion_id, {
@@ -218,13 +219,16 @@ class DiscussionEngine:
             )
 
             if round_num % 3 == 0 or round_num == total_rounds:
-                await self._extract_and_push_consensus(
+                cons_data = await self._extract_and_push_consensus(
                     discussion_id=discussion_id,
                     topic=topic,
                     messages=messages,
                     event_bus=event_bus,
                     is_final=(round_num == total_rounds),
                 )
+                # 将真实的共识数据写入数据库
+                if cons_data and on_consensus:
+                    await on_consensus(cons_data.get("agreements", []), cons_data.get("divergences", []))
 
         # ---- 主持人总结 ----
         messages.append({
@@ -266,11 +270,7 @@ class DiscussionEngine:
         # 将讨论状态写入数据库
         try:
             if on_complete:
-                final_consensus = {
-                    "agreements": ["各方都认同需要深入探讨", "安全与创新需要平衡"],
-                    "divergences": ["具体实施路径存在分歧", "优先级排序看法不一"],
-                }
-                await on_complete(final_consensus)
+                await on_complete()
         except Exception:
             pass
 
@@ -496,7 +496,7 @@ class DiscussionEngine:
         messages: list[dict],
         event_bus: EventBus,
         is_final: bool = False,
-    ) -> None:
+    ) -> dict:
         consensus_prompt = (
             f"基于以上关于「{topic}」的讨论内容，请提炼出：\n"
             "1. agreements: 当前参与者已达成的共识要点\n"
@@ -528,5 +528,6 @@ class DiscussionEngine:
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
             })
+            return consensus
         except Exception:
-            pass
+            return {"agreements": [], "divergences": []}
