@@ -29,6 +29,13 @@ const useStudioStore = create((set, get) => ({
 
   setDiscussionStatus: (status) => set({ discussionStatus: status }),
 
+  /** 批量加载消息（用于已完成讨论的历史记录加载） */
+  loadMessages: (msgs) => set({
+    messages: msgs,
+    typingMessage: null,
+    _pendingContent: "",
+  }),
+
   /** 更新嘉宾状态（thinking / speaking / idle） */
   updateGuestStatus: (participantId, status) =>
     set((state) => ({

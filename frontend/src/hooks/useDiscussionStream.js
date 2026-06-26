@@ -6,13 +6,8 @@ const SSE_URL = "http://localhost:8000";
 /**
  * useDiscussionStream(discussionId)
  *
- * 职责（单一）：
- * 1. 通过 discussionId 连接 SSE 事件流
- * 2. 断线自动重连（EventSource 内置 + 手动兜底）
- * 3. 解析 4 种 SSE 事件并写入 Zustand Store
- * 4. 组件卸载时断开
- *
- * 页面组件只负责拿 store 的数据渲染，不感知任何 SSE 逻辑。
+ * 连接 SSE 事件流并自动更新 Zustand Store。
+ * 传入 null 则跳过连接（用于已结束讨论的历史回放模式）。
  */
 export default function useDiscussionStream(discussionId) {
   const esRef = useRef(null);
@@ -25,13 +20,11 @@ export default function useDiscussionStream(discussionId) {
     updateTypingContent,
     finalizeTyping,
     updateConsensus,
-    addMessage,
   } = useStudioStore();
 
   const connect = useCallback(() => {
     if (!discussionId || !mountedRef.current) return;
 
-    // 清理旧连接
     if (esRef.current) {
       esRef.current.close();
       esRef.current = null;
@@ -40,33 +33,25 @@ export default function useDiscussionStream(discussionId) {
     const es = new EventSource(`${SSE_URL}/api/discussions/${discussionId}/events`);
     esRef.current = es;
 
-    // ── 4 种事件处理器 ──
-
     es.addEventListener("guest_status_change", (e) => {
       if (!mountedRef.current) return;
-      try {
-        const d = JSON.parse(e.data);
-        updateGuestStatus(d.participant_id, d.status);
-      } catch (_) {}
+      try { updateGuestStatus(JSON.parse(e.data).participant_id, JSON.parse(e.data).status); }
+      catch (_) {}
     });
 
     es.addEventListener("message_chunk", (e) => {
       if (!mountedRef.current) return;
       try {
         const d = JSON.parse(e.data);
-        if (d.is_final) {
-          finalizeTyping(d);
-        } else {
-          updateTypingContent(d);
-        }
+        if (d.is_final) finalizeTyping(d);
+        else updateTypingContent(d);
       } catch (_) {}
     });
 
     es.addEventListener("consensus_update", (e) => {
       if (!mountedRef.current) return;
-      try {
-        updateConsensus(JSON.parse(e.data));
-      } catch (_) {}
+      try { updateConsensus(JSON.parse(e.data)); }
+      catch (_) {}
     });
 
     es.addEventListener("discussion_status", (e) => {
@@ -78,21 +63,27 @@ export default function useDiscussionStream(discussionId) {
       } catch (_) {}
     });
 
-    // ── 断线重连 ──
+    // 终场总结（暂未在前端展示，预留事件解析）
+    es.addEventListener("discussion_summary", (e) => {
+      if (!mountedRef.current) return;
+      try { const d = JSON.parse(e.data); console.log("Summary:", d.summary); }
+      catch (_) {}
+    });
+
     es.onerror = () => {
       if (!mountedRef.current) return;
       es.close();
       esRef.current = null;
-      // 3 秒后重试
       retryTimer.current = setTimeout(() => {
         if (mountedRef.current) connect();
       }, 3000);
     };
   }, [discussionId, updateGuestStatus, updateTypingContent, finalizeTyping, updateConsensus, setDiscussionStatus]);
 
-  // 连接 / 断连
   useEffect(() => {
     mountedRef.current = true;
+
+    // 只在 discussionId 有效时连接（null = 历史回放模式，不需要 SSE）
     if (discussionId) connect();
 
     return () => {

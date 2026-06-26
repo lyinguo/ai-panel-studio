@@ -331,6 +331,30 @@ body {
 .transcript__ending-line { flex: 1; height: 1px; background: var(--border); }
 .transcript__ending-text { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
 
+/* 讨论结果摘要 */
+.transcript__result {
+  text-align: center;
+  padding: 20px 0 4px;
+}
+
+.transcript__result-line {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+  margin-bottom: 14px;
+}
+
+.transcript__result-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.transcript__result-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ════════════════════════════════════════════════
    消息气泡
    ════════════════════════════════════════════════ */

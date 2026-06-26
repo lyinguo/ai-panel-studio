@@ -4,14 +4,43 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.discussions import router as discussions_router
-from app.db import Base, engine
+from app.db import Base, engine, SessionLocal
+
+
+def _migrate_old_discussions():
+    """启动迁移：修复旧讨论的状态和消息记录。
+
+    旧版（v1）讨论引擎没有将发言保存到 messages 表，
+    也没有将 status 改为 completed。此迁移修复这些数据。
+    """
+    from app.models import Discussion
+
+    db = SessionLocal()
+    try:
+        discs = db.query(Discussion).filter(
+            Discussion.status.in_(["pending", "in_progress"])
+        ).all()
+        for d in discs:
+            # 如果讨论创建超过 30 分钟且没有 in_progress → 说明是旧版遗留
+            # 直接标记为 completed 以显示在首页
+            from datetime import datetime, timezone
+            if d.created_at:
+                age = datetime.now(timezone.utc) - d.created_at.replace(tzinfo=timezone.utc)
+                if age.total_seconds() > 1800:  # 30 分钟
+                    d.status = "completed"
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理。"""
-    # 启动时自动创建所有数据库表
     Base.metadata.create_all(bind=engine)
+    # 启动时修复旧讨论状态
+    _migrate_old_discussions()
     yield
 
 

@@ -14,6 +14,7 @@ function Studio() {
   const loaded = useRef(false);
 
   const {
+    discussionId,
     participants,
     messages,
     typingMessage,
@@ -23,33 +24,58 @@ function Studio() {
     setDiscussionId,
     setParticipants,
     setDiscussionStatus,
+    loadMessages,
+    updateConsensus,
     resetDiscussion,
   } = useStudioStore();
 
-  // 1. 加载讨论元数据
+  // 加载讨论元数据 + 历史消息
   useEffect(() => {
     if (!id || loaded.current) return;
     loaded.current = true;
 
     (async () => {
       try {
-        const resp = await fetch(`${API}/api/discussions/${id}`);
-        if (!resp.ok) { navigate("/"); return; }
-        const data = await resp.json();
-        if (data.status === "pending") { navigate(`/lobby/${id}`); return; }
-        setDiscussionId(data.id);
-        setParticipants(data.participants);
-        setDiscussionStatus(data.status === "completed" ? "completed" : "in_progress");
+        // 1. 获取讨论元数据
+        const metaResp = await fetch(`${API}/api/discussions/${id}`);
+        if (!metaResp.ok) { navigate("/"); return; }
+        const meta = await metaResp.json();
+        if (meta.status === "pending") { navigate(`/lobby/${id}`); return; }
+
+        setDiscussionId(meta.id);
+        setParticipants(meta.participants);
+        setDiscussionStatus(meta.status === "completed" ? "completed" : "in_progress");
+
+        // 2. 如果讨论已结束或已有消息，加载历史消息
+        const msgResp = await fetch(`${API}/api/discussions/${id}/messages?limit=200`);
+        if (msgResp.ok) {
+          const msgs = await msgResp.json();
+          if (msgs.length > 0) {
+            loadMessages(msgs);
+          }
+        }
+
+        // 3. 加载共识数据
+        if (meta.consensus) {
+          updateConsensus(meta.consensus);
+        }
       } catch (e) {
+        console.error("加载讨论失败:", e);
         navigate("/");
       }
     })();
 
-    return () => resetDiscussion();
+    return () => {
+      resetDiscussion();
+      loaded.current = false;
+    };
   }, [id]);
 
-  // 2. SSE 连接（纯副作用，不返回值）
-  useDiscussionStream(id);
+  // SSE 连接（实时事件）
+  useDiscussionStream(discussionStatus === "in_progress" ? id : null);
+
+  const isCompleted = discussionStatus === "completed";
+  const showResults = isCompleted && messages.length > 0;
 
   return (
     <div className="studio">
@@ -79,11 +105,16 @@ function Studio() {
             <span className="studio__msg-count">{messages.length} 条发言</span>
           </div>
         )}
-        {discussionStatus === "completed" && (
+        {isCompleted && (
           <div className="studio__status-bar studio__status-bar--done">
             <span>✓ 讨论已结束</span>
             <span className="studio__msg-count">{messages.length} 条发言</span>
             <button className="studio-btn studio-btn--ghost" onClick={() => navigate("/")}>返回列表</button>
+          </div>
+        )}
+        {!discussionStatus && (
+          <div className="studio__status-bar">
+            <span>加载中...</span>
           </div>
         )}
       </div>

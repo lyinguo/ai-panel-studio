@@ -50,13 +50,13 @@ function HomePage() {
   };
 
   const statusLabel = (s) => {
-    const map = { pending: "查看阵容", in_progress: "观赛中", completed: "已回顾" };
+    const map = { pending: "待开始", in_progress: "观赛中", completed: "已结束" };
     return map[s] || s;
   };
 
   const statusColor = (s) => {
     if (s === "in_progress") return "#10B981";
-    if (s === "completed") return "#6B7280";
+    if (s === "completed") return "#64748B";
     return "#F59E0B";
   };
 

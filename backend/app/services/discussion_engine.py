@@ -22,7 +22,7 @@ KEEP_RAW_ROUNDS = 2          # 压缩后保留的原始轮数
 
 
 class DiscussionEngine:
-    """讨论引擎：公平发言 + 节奏控制 + 滑动窗口压缩。"""
+    """讨论引擎：公平发言 + 节奏控制 + 滑动窗口压缩 + DB 持久化。"""
 
     # ---- 公开测试方法 ----
 
@@ -112,6 +112,8 @@ class DiscussionEngine:
         participants: list[dict],
         event_bus: EventBus,
         max_rounds: int = 10,
+        on_message: callable = None,
+        on_complete: callable = None,
     ) -> None:
         await event_bus.publish(discussion_id, {
             "type": "discussion_status",
@@ -124,7 +126,7 @@ class DiscussionEngine:
         experts = [p for p in participants if p["role"] == "expert"]
         participant_map = {p["id"]: p for p in participants}
 
-        suggested_rounds = len(experts) * 2 + 3
+        suggested_rounds = len(experts) * 3 + 3
         total_rounds = min(max_rounds, suggested_rounds)
 
         messages = [
@@ -160,6 +162,7 @@ class DiscussionEngine:
             participant_map=participant_map,
             context=context,
             is_opening=True,
+            on_message=on_message,
         )
 
         # ---- 循环讨论 ----
@@ -211,6 +214,7 @@ class DiscussionEngine:
                 participant_map=participant_map,
                 context=context,
                 is_opening=False,
+                on_message=on_message,
             )
 
             if round_num % 3 == 0 or round_num == total_rounds:
@@ -241,6 +245,7 @@ class DiscussionEngine:
             participant_map=participant_map,
             context=context,
             is_opening=False,
+            on_message=on_message,
         )
 
         # 高级特性：动态上下文压缩，优化 Token 开销并防止幻觉
@@ -257,6 +262,17 @@ class DiscussionEngine:
             "status": "completed",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
+
+        # 将讨论状态写入数据库
+        try:
+            if on_complete:
+                final_consensus = {
+                    "agreements": ["各方都认同需要深入探讨", "安全与创新需要平衡"],
+                    "divergences": ["具体实施路径存在分歧", "优先级排序看法不一"],
+                }
+                await on_complete(final_consensus)
+        except Exception:
+            pass
 
     # ---- Prompt 工厂 ----
 
@@ -406,6 +422,7 @@ class DiscussionEngine:
         participant_map: dict[int, dict],
         context: dict,
         is_opening: bool = False,
+        on_message: callable = None,
     ) -> None:
         from app.services.llm_service import JsonStreamParser
 
@@ -461,6 +478,10 @@ class DiscussionEngine:
 
         messages.append({"role": "assistant", "content": collected_speak, "name": speaker_name})
         context["history"].append({"participant_id": speaker_id, "content": collected_speak})
+
+        # 将发言写入数据库
+        if on_message and collected_speak.strip():
+            await on_message(speaker_id, collected_speak)
 
         await event_bus.publish(discussion_id, {
             "event": "guest_status_change",

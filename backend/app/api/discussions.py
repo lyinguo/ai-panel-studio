@@ -211,6 +211,19 @@ def get_discussion(discussion_id: int, db: Session = Depends(get_db)):
     if not discussion:
         raise HTTPException(status_code=404, detail="讨论不存在")
 
+    import json as _json
+
+    # 解析共识数据
+    cons_data = {"agreements": [], "divergences": []}
+    if discussion.consensus:
+        try:
+            cons_data = {
+                "agreements": _json.loads(discussion.consensus.agreements or "[]"),
+                "divergences": _json.loads(discussion.consensus.divergences or "[]"),
+            }
+        except Exception:
+            pass
+
     return {
         "id": discussion.id,
         "topic": discussion.topic,
@@ -229,6 +242,7 @@ def get_discussion(discussion_id: int, db: Session = Depends(get_db)):
             }
             for p in discussion.participants
         ],
+        "consensus": cons_data,
     }
 
 
@@ -318,12 +332,55 @@ async def _run_discussion_in_background(
     topic: str,
     participants: list[dict],
 ) -> None:
-    """在后端运行完整的 AI 圆桌讨论流程。"""
+    """在后端运行完整的 AI 圆桌讨论流程，并将结果写入数据库。"""
+    from app.db import SessionLocal
+    from app.models import Discussion as DiscussionModel, Message as MessageModel
+    from app.models import Consensus as ConsensusModel
+
     engine = DiscussionEngine()
+
+    # 回调：保存一条消息到 DB
+    async def on_message(participant_id: int, content: str):
+        db = SessionLocal()
+        try:
+            msg = MessageModel(
+                discussion_id=discussion_id,
+                participant_id=participant_id,
+                content=content,
+            )
+            db.add(msg)
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
+    # 回调：更新讨论状态 + 保存共识
+    async def on_complete(final_consensus: dict | None = None):
+        db = SessionLocal()
+        try:
+            disc = db.query(DiscussionModel).filter(DiscussionModel.id == discussion_id).first()
+            if disc:
+                disc.status = "completed"
+            if final_consensus:
+                cons = db.query(ConsensusModel).filter(
+                    ConsensusModel.discussion_id == discussion_id
+                ).first()
+                if cons:
+                    cons.agreements = json.dumps(final_consensus.get("agreements", []))
+                    cons.divergences = json.dumps(final_consensus.get("divergences", []))
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
     await engine.run_discussion(
         discussion_id=discussion_id,
         topic=topic,
         participants=participants,
         event_bus=event_bus,
-        max_rounds=10,
+        max_rounds=15,
+        on_message=on_message,
+        on_complete=on_complete,
     )
