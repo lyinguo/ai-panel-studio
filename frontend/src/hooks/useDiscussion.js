@@ -4,18 +4,8 @@ import useStudioStore from "../stores/studioStore";
 const SSE_URL = "http://localhost:8000";
 const API_URL = "http://localhost:8000";
 
-/**
- * useDiscussion — SSE 事件流连接与管理 Hook
- *
- * 职责：
- * 1. POST /api/discussions 创建讨论
- * 2. EventSource 连接 SSE /api/discussions/{id}/events
- * 3. 将三种事件分派到 Zustand Store
- * 4. 自动重连 & 清理
- */
 export default function useDiscussion() {
   const esRef = useRef(null);
-  const discussionIdRef = useRef(null);
 
   const {
     discussionStatus,
@@ -26,122 +16,82 @@ export default function useDiscussion() {
     updateTypingContent,
     finalizeTyping,
     updateConsensus,
-    addMessage,
   } = useStudioStore();
 
-  /** 创建讨论并连接 SSE */
-  const startDiscussion = useCallback(
-    async (topic, expertCount = 4) => {
-      // 防连点：已经在进行中则忽略
-      const status = discussionStatus;
-      if (status === "starting" || status === "in_progress") return;
+  /** 连接到已有的讨论（SSE） */
+  const _connectSSE = useCallback((discussionId) => {
+    if (esRef.current) esRef.current.close();
 
-      setDiscussionStatus("starting");
+    const es = new EventSource(`${SSE_URL}/api/discussions/${discussionId}/events`);
+    esRef.current = es;
 
-      // 1. POST 创建讨论
-      let discussionId;
+    es.addEventListener("guest_status_change", (e) => {
       try {
-        const resp = await fetch(`${API_URL}/api/discussions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic, expert_count: expertCount }),
-        });
-        if (!resp.ok) throw new Error(`创建失败: ${resp.status}`);
-        const data = await resp.json();
-        discussionId = data.discussion_id;
-        discussionIdRef.current = discussionId;
-        setDiscussionId(discussionId);
-        setParticipants(data.participants);
-        setDiscussionStatus("in_progress");
-      } catch (err) {
-        console.error("创建讨论失败:", err);
-        setDiscussionStatus("idle");
-        return;
-      }
+        updateGuestStatus(JSON.parse(e.data).participant_id, JSON.parse(e.data).status);
+      } catch (_) {}
+    });
 
-      // 2. 连接 SSE
-      if (esRef.current) {
-        esRef.current.close();
-      }
+    es.addEventListener("message_chunk", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.is_final) finalizeTyping(data);
+        else updateTypingContent(data);
+      } catch (_) {}
+    });
 
-      const es = new EventSource(`${SSE_URL}/api/discussions/${discussionId}/events`);
-      esRef.current = es;
+    es.addEventListener("consensus_update", (e) => {
+      try {
+        updateConsensus(JSON.parse(e.data));
+      } catch (_) {}
+    });
 
-      es.addEventListener("guest_status_change", (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          updateGuestStatus(data.participant_id, data.status);
-        } catch (err) {
-          console.error("guest_status_change 解析失败:", err);
-        }
+    es.addEventListener("discussion_status", (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        if (d.status === "completed") setDiscussionStatus("completed");
+        if (d.status === "in_progress") setDiscussionStatus("in_progress");
+      } catch (_) {}
+    });
+
+    es.onerror = () => {};
+  }, [updateGuestStatus, updateTypingContent, finalizeTyping, updateConsensus, setDiscussionStatus]);
+
+  /** 创建新讨论 */
+  const startDiscussion = useCallback(async (topic, expertCount = 4) => {
+    if (discussionStatus === "starting" || discussionStatus === "in_progress") return;
+    setDiscussionStatus("starting");
+
+    try {
+      const resp = await fetch(`${API_URL}/api/discussions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, expert_count: expertCount }),
       });
-
-      es.addEventListener("message_chunk", (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.is_final) {
-            finalizeTyping(data);
-          } else {
-            updateTypingContent(data);
-          }
-        } catch (err) {
-          console.error("message_chunk 解析失败:", err);
-        }
-      });
-
-      es.addEventListener("consensus_update", (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          updateConsensus(data);
-        } catch (err) {
-          console.error("consensus_update 解析失败:", err);
-        }
-      });
-
-      es.addEventListener("discussion_status", (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.status === "completed") {
-            setDiscussionStatus("completed");
-          }
-        } catch (err) {
-          console.error("discussion_status 解析失败:", err);
-        }
-      });
-
-      es.onerror = () => {
-        console.warn("SSE 连接错误，尝试重连...");
-      };
-    },
-    [
-      setDiscussionId,
-      setDiscussionStatus,
-      setParticipants,
-      updateGuestStatus,
-      updateTypingContent,
-      finalizeTyping,
-      updateConsensus,
-    ]
-  );
-
-  /** 断开 SSE 连接 */
-  const stopDiscussion = useCallback(() => {
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
+      if (!resp.ok) throw new Error(`创建失败: ${resp.status}`);
+      const data = await resp.json();
+      setDiscussionId(data.discussion_id);
+      setParticipants(data.participants);
+      setDiscussionStatus("in_progress");
+      _connectSSE(data.discussion_id);
+    } catch (err) {
+      console.error("创建讨论失败:", err);
+      setDiscussionStatus("idle");
     }
-    discussionIdRef.current = null;
-  }, []);
+  }, [discussionStatus, setDiscussionId, setDiscussionStatus, setParticipants, _connectSSE]);
 
-  // 卸载时清理
+  /** 连接到已有讨论（从首页进入） */
+  const connectToDiscussion = useCallback((data) => {
+    setDiscussionId(data.id);
+    setParticipants(data.participants);
+    setDiscussionStatus(data.status === "completed" ? "completed" : "in_progress");
+    _connectSSE(data.id);
+  }, [setDiscussionId, setParticipants, setDiscussionStatus, _connectSSE]);
+
   useEffect(() => {
     return () => {
-      if (esRef.current) {
-        esRef.current.close();
-        esRef.current = null;
-      }
+      if (esRef.current) { esRef.current.close(); esRef.current = null; }
     };
   }, []);
 
-  return { startDiscussion, stopDiscussion };
+  return { startDiscussion, connectToDiscussion };
 }
