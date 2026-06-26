@@ -103,6 +103,14 @@ class DiscussionEngine:
             "4. 不要一味附和，独立思考是讨论的核心价值。",
             "5. 主持人负责引导流程，确保每位专家都有发言机会。",
             "6. 讨论接近上限时，主持人应引导总结并结束讨论。",
+            "",
+            "【输出格式】",
+            "每次发言必须输出严格 JSON 格式：",
+            "{\"thought\": \"你的内部思考过程...\", \"speak\": \"你实际说出口的 1-2 句话\"}",
+            "要求：",
+            "- thought 是内部思考，不会直接展示给观众",
+            "- speak 是最终发言，控制在 1-2 句",
+            "- 每次只输出一个 JSON 对象，不要包裹 markdown 代码块",
         ])
         return "\n".join(lines)
 
@@ -138,7 +146,8 @@ class DiscussionEngine:
                 "role": "user",
                 "content": (
                     f"请以主持人「{host['name']}」的身份开始讨论，"
-                    f"围绕「{topic}」做一个简短的开场。控制在 1-2 句。"
+                    f"围绕「{topic}」做一个简短的开场。控制在 1-2 句。\n"
+                    f"请以 JSON 格式输出：{{\"thought\":\"...\",\"speak\":\"...\"}}"
                 ),
             },
         ]
@@ -176,33 +185,30 @@ class DiscussionEngine:
             rounds_left = total_rounds - round_num
 
             if rounds_left <= 1:
-                # 最后一轮前，主持人催促
                 prompt = (
                     f"现在请{speaker_type}（{speaker['name']}，{speaker['title']}）发言。"
                     f"你的立场：{speaker['stance']}\n\n"
                     f"1. 控制在 1-2 句。\n"
                     f"2. 讨论即将结束，请做最后的观点陈述。\n"
-                    f"3. 可以简要反驳或补充之前的观点。"
+                    f"3. 请以 JSON 格式输出：{{\"thought\":\"...\",\"speak\":\"...\"}}"
                 )
             elif round_num <= 3:
-                # 前几轮：深入探讨
                 prompt = (
                     f"现在请{speaker_type}（{speaker['name']}，{speaker['title']}）发言。"
                     f"你的立场：{speaker['stance']}\n\n"
                     f"1. 控制在 1-2 句。\n"
                     f"2. 结合你自己的立场发表核心见解。\n"
                     f"3. 可以反驳或补充前面其他人的观点。\n"
-                    f"4. 不允许机械重复。"
+                    f"4. 请以 JSON 格式输出：{{\"thought\":\"...\",\"speak\":\"...\"}}"
                 )
             else:
-                # 中段：观点碰撞
                 prompt = (
                     f"现在请{speaker_type}（{speaker['name']}，{speaker['title']}）发言。"
                     f"你的立场：{speaker['stance']}\n\n"
                     f"1. 控制在 1-2 句。\n"
                     f"2. 请对前面的观点做出回应或反驳。\n"
                     f"3. 提出你独特的见解。\n"
-                    f"4. 不允许机械重复。"
+                    f"4. 请以 JSON 格式输出：{{\"thought\":\"...\",\"speak\":\"...\"}}"
                 )
 
             messages.append({"role": "user", "content": prompt})
@@ -236,7 +242,8 @@ class DiscussionEngine:
             "role": "user",
             "content": (
                 f"讨论已接近尾声，请以主持人「{host['name']}」的身份"
-                f"做一个简短的总结发言，概括各方的核心观点。控制在 2-3 句。"
+                f"做一个简短的总结发言，概括各方的核心观点。控制在 2-3 句。\n"
+                f"请以 JSON 格式输出：{{\"thought\":\"...\",\"speak\":\"...\"}}"
             ),
         })
 
@@ -280,8 +287,20 @@ class DiscussionEngine:
         context: dict,
         is_opening: bool = False,
     ) -> None:
-        """让一位参与者发言，流式输出。"""
+        """让一位参与者发言，流式输出结构化 JSON（thought/speak）。
+
+        流式解析流程：
+        1. 接收 LLM 流式 chunk
+        2. JsonStreamParser 提取完整 {"thought":..., "speak":...} 对象
+        3. thought → 展示思考状态；speak → 流式推送到前端
+        4. 任何代码块标记（```json 等）被 clean_code_blocks 在 parsing 前清除
+        """
+        from app.services.llm_service import JsonStreamParser
+
         timestamp = datetime.now(timezone.utc).isoformat()
+        parser = JsonStreamParser()
+        collected_speak = ""
+        speak_chunk_index = 0
 
         await event_bus.publish(discussion_id, {
             "event": "guest_status_change",
@@ -292,20 +311,55 @@ class DiscussionEngine:
             },
         })
 
-        full_content = ""
-        chunk_index = 0
-        async for chunk in LlmService.stream_chat(messages):
-            full_content += chunk
-            await event_bus.publish(discussion_id, {
-                "event": "message_chunk",
-                "data": {
-                    "participant_id": speaker_id,
-                    "chunk_index": chunk_index,
-                    "content": chunk,
-                    "is_final": False,
-                },
-            })
-            chunk_index += 1
+        async for raw_chunk in LlmService.stream_chat(messages):
+            # 解析流式 JSON
+            objects = parser.feed(raw_chunk)
+            for obj in objects:
+                # thought → 触发思考状态（前端显示思考指示器）
+                if "thought" in obj and obj["thought"]:
+                    await event_bus.publish(discussion_id, {
+                        "event": "guest_status_change",
+                        "data": {
+                            "participant_id": speaker_id,
+                            "status": "thinking",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    })
+
+                # speak → 流式推送到打字机
+                if "speak" in obj and obj["speak"]:
+                    collected_speak += obj["speak"]
+                    await event_bus.publish(discussion_id, {
+                        "event": "message_chunk",
+                        "data": {
+                            "participant_id": speaker_id,
+                            "chunk_index": speak_chunk_index,
+                            "content": obj["speak"],
+                            "is_final": False,
+                        },
+                    })
+                    speak_chunk_index += 1
+
+        # flush 残留
+        remaining = parser.flush()
+        if remaining:
+            if "speak" in remaining and remaining["speak"]:
+                collected_speak += remaining["speak"]
+                await event_bus.publish(discussion_id, {
+                    "event": "message_chunk",
+                    "data": {
+                        "participant_id": speaker_id,
+                        "chunk_index": speak_chunk_index,
+                        "content": remaining["speak"],
+                        "is_final": False,
+                    },
+                })
+                speak_chunk_index += 1
+
+        # 如果没有解析到 speak，用原始 fallback
+        if not collected_speak:
+            async for chunk in LlmService.stream_chat(messages):
+                collected_speak += chunk
 
         message_id = hash((discussion_id, speaker_id, timestamp)) % (10**9)
 
@@ -313,7 +367,7 @@ class DiscussionEngine:
             "event": "message_chunk",
             "data": {
                 "participant_id": speaker_id,
-                "chunk_index": chunk_index,
+                "chunk_index": speak_chunk_index,
                 "content": "",
                 "is_final": True,
                 "message_id": message_id,
@@ -322,13 +376,13 @@ class DiscussionEngine:
 
         messages.append({
             "role": "assistant",
-            "content": full_content,
+            "content": collected_speak,
             "name": speaker_name,
         })
 
         context["history"].append({
             "participant_id": speaker_id,
-            "content": full_content,
+            "content": collected_speak,
         })
 
         await event_bus.publish(discussion_id, {

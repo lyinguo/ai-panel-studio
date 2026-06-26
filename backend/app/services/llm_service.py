@@ -76,6 +76,84 @@ class ThinkTagStripper:
         return ""
 
 
+# ============================================================
+# CodeBlockCleaner — 清洗代码块标记
+# ============================================================
+
+def clean_code_blocks(text: str) -> str:
+    """在推送给前端前清洗 markdown 代码块标记。
+
+    移除 ```json、```、~~~ 等包裹符号，确保前端收到纯净文本。
+    """
+    text = re.sub(r'```(?:json|markdown|text)?\s*', '', text)
+    text = re.sub(r'\s*```', '', text)
+    text = re.sub(r'~~~(?:json|markdown|text)?\s*', '', text)
+    text = re.sub(r'\s*~~~', '', text)
+    return text.strip()
+
+
+# ============================================================
+# JsonStreamParser — 流式 JSON 缓冲区解析器
+# ============================================================
+
+class JsonStreamParser:
+    """从流式文本块中提取完整 JSON 对象。
+
+    设计目标：
+    - 处理任意位置截断的 JSON（{ / } 跨 chunk 边界）
+    - 单个 chunk 内可能包含多个 JSON 对象
+    - 嵌套的花括号文本正确处理
+    - 损坏的 JSON 不抛异常，丢弃即可
+    - 流结束时 flush() 返回 buffer 残留
+    """
+
+    def __init__(self):
+        self._buffer = ""
+
+    def feed(self, chunk: str) -> list[dict]:
+        """输入文本块，返回解析出的完整 JSON 对象列表。"""
+        self._buffer += clean_code_blocks(chunk)
+        results = []
+
+        while True:
+            start = self._buffer.find('{')
+            if start < 0:
+                break
+
+            depth = 0
+            end = -1
+            for i in range(start, len(self._buffer)):
+                c = self._buffer[i]
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+
+            if end < 0:
+                self._buffer = self._buffer[start:]
+                break
+
+            raw = self._buffer[start:end + 1]
+            self._buffer = self._buffer[end + 1:]
+
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict):
+                    results.append(obj)
+            except json.JSONDecodeError:
+                pass
+
+        return results
+
+    def flush(self) -> dict | None:
+        """流结束时返回 buffer 残留（无完整 JSON 时返回 None）。"""
+        self._buffer = ""
+        return None
+
+
 COLOR_PALETTE = [
     "#4A90D9", "#FF6B6B", "#50C878", "#FFD700",
     "#9B59B6", "#FF8C42", "#00CED1", "#E91E63", "#7F8C8D",
@@ -299,81 +377,81 @@ class LlmService:
 
     @classmethod
     def _generate_speech(cls, prompt: str) -> str:
-        """从发言 prompt 中提取上下文，生成 1-2 句模拟发言。"""
+        """从发言 prompt 中提取上下文，生成 JSON 格式的模拟发言。"""
         name = "发言人"
         stance = ""
         topic = "当前话题"
         is_opening = "开场的" in prompt or "开场" in prompt
         is_summary = "总结" in prompt or "结束" in prompt
 
-        # 提取姓名
         m = re.search(r'（([^）]+)', prompt)
         if m:
             name = m.group(1)
 
-        # 提取立场
         m = re.search(r'立场[：:]\s*([^\n。]+)', prompt)
         if m:
             stance = m.group(1).strip()
 
-        # 提取话题
         m = re.search(r'「([^」]+)」', prompt)
         if m:
             topic = m.group(1)
 
-        # 根据角色生成不同发言
         if is_opening:
-            return (
-                f"欢迎各位来到关于「{topic}」的圆桌讨论。"
-                f"今天这个话题非常有价值，在座各位都有深入的见解。"
-                f"让我们依次分享观点，碰撞出思想的火花。"
-            )
+            return json.dumps({
+                "thought": f"作为主持人，我需要为关于「{topic}」的讨论做开场。",
+                "speak": (
+                    f"欢迎各位来到关于「{topic}」的圆桌讨论。"
+                    f"今天这个话题非常有价值，在座各位都有深入的见解。"
+                    f"让我们依次分享观点，碰撞出思想的火花。"
+                ),
+            })
 
         if is_summary:
-            return (
-                f"感谢各位的精彩发言。今天我们听到了多元的视角，"
-                f"虽然在一些具体问题上存在分歧，但在核心方向上达成了基本共识。"
-                f"这场讨论为我们提供了宝贵的思考框架。"
-            )
+            return json.dumps({
+                "thought": f"讨论已接近尾声，我来总结各方的核心观点。",
+                "speak": (
+                    f"感谢各位的精彩发言。今天我们听到了多元的视角，"
+                    f"虽然在一些具体问题上存在分歧，但在核心方向上达成了基本共识。"
+                    f"这场讨论为我们提供了宝贵的思考框架。"
+                ),
+            })
 
-        # 普通发言：根据立场生成
+        # 普通发言
         if "技术中立" in stance:
-            return (
+            thought = f"从技术中立的立场出发，思考{topic}的监管问题。"
+            speak = (
                 f"关于「{topic}」，我认为技术本身没有善恶之分。"
-                f"关键在于我们如何建立有效的监管和应用框架，"
-                f"让技术真正服务于人类需求。"
+                f"关键在于我们如何建立有效的监管和应用框架。"
             )
         elif "审慎" in stance or "渐进" in stance or "安全" in stance:
-            return (
+            thought = f"从安全角度权衡{topic}的潜在风险。"
+            speak = (
                 f"我同意大家的关注，但想强调安全必须前置。"
                 f"在没有充分理解潜在风险之前，保持审慎态度是对社会负责的表现。"
             )
         elif "认知" in stance or "差距" in stance:
-            return (
+            thought = f"从认知科学角度分析，当前 AI 与真正理解的差距。"
+            speak = (
                 f"我想从基础认知的视角补充一点。"
                 f"当前系统本质上是高级模式匹配，距离真正的理解还有本质差距。"
-                f"我们需要更务实地评估现状。"
             )
         elif "开源" in stance or "透明" in stance:
-            return (
+            thought = f"强调开源透明在{topic}中的重要性。"
+            speak = (
                 f"无论技术发展到哪一步，开放透明都是最好的安全机制。"
-                f"开源社区的研究和讨论能汇聚全球智慧，降低闭门造车的风险。"
+                f"开源社区的研究能汇聚全球智慧，降低闭门造车的风险。"
             )
         elif "中立" in stance or "引导" in stance:
-            return (
+            thought = f"引导讨论方向，确保{topic}从不同维度被剖析。"
+            speak = (
                 f"让我引导一下讨论方向。关于「{topic}」，"
                 f"我们是否可以从正反两面各梳理一下核心论据？"
             )
         else:
-            # 随机发言
-            opinions = [
-                f"关于「{topic}」，我认为需要从多个维度来审视。",
-                f"这个问题的核心在于我们如何平衡发展与安全的关系。",
-                f"我基本认同前面的观点，但想补充一个不同的视角。",
-                f"从我的专业领域来看，这个问题比表面看起来要复杂得多。",
-                f"我们是否忽略了另一个重要的影响因素？",
-            ]
-            return random.choice(opinions)
+            thought = f"思考关于{topic}的讨论要点。"
+            speak = f"关于「{topic}」，我认为需要从多个维度来审视这个问题。"
+
+        return json.dumps({"thought": thought, "speak": speak})
 
     # ════════════════════════════════════════════
     # 参与者解析与兜底
