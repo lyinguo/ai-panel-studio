@@ -42,7 +42,7 @@ function HomePage() {
       });
       if (!resp.ok) throw new Error(`创建失败: ${resp.status}`);
       const data = await resp.json();
-      navigate(`/discussion/${data.discussion_id}`);
+      navigate(`/lobby/${data.discussion_id}`);
     } catch (e) {
       setError(e.message);
       setCreating(false);
@@ -50,7 +50,7 @@ function HomePage() {
   };
 
   const statusLabel = (s) => {
-    const map = { pending: "待开始", in_progress: "进行中", completed: "已结束" };
+    const map = { pending: "查看阵容", in_progress: "观赛中", completed: "已回顾" };
     return map[s] || s;
   };
 
@@ -116,7 +116,10 @@ function HomePage() {
               <div
                 key={d.id}
                 className="home__card"
-                onClick={() => navigate(`/discussion/${d.id}`)}
+                onClick={() => {
+                  if (d.status === "pending") navigate(`/lobby/${d.id}`);
+                  else navigate(`/studio/${d.id}`);
+                }}
               >
                 <div className="home__card-top">
                   <span className="home__card-topic">{d.topic}</span>

@@ -36,6 +36,8 @@ function Studio() {
         const resp = await fetch(`${API}/api/discussions/${id}`);
         if (!resp.ok) { navigate("/"); return; }
         const data = await resp.json();
+        // 如果讨论还没开始，回到候场页
+        if (data.status === "pending") { navigate(`/lobby/${id}`); return; }
         connectToDiscussion(data);
       } catch (e) {
         console.error("加载讨论失败:", e);

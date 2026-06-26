@@ -113,21 +113,64 @@ async def create_discussion(
     db.add(consensus)
     db.commit()
 
-    # 5. 在后端启动讨论（不阻塞响应）
-    discussion_id = discussion.id  # 在 close 前捕获 id
-    # 将带 ID 的参与者数据转为 dict 传给后台任务
+    # 5. 返回阵容，等待用户确认（不启动讨论）
+    discussion_id = discussion.id
     participant_dicts = [p.model_dump() for p in participant_responses]
     db.close()
-    asyncio.create_task(_run_discussion_in_background(
-        discussion_id=discussion_id,
-        topic=body.topic,
-        participants=participant_dicts,
-    ))
 
     return CreateDiscussionResponse(
         discussion_id=discussion_id,
         participants=participant_responses,
     )
+
+
+# ============================================================
+# PUT /api/discussions/{id}/start — 确认阵容并开始讨论
+# ============================================================
+
+@router.put(
+    "/discussions/{discussion_id}/start",
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def start_discussion(
+    discussion_id: int,
+    db: Session = Depends(get_db),
+):
+    """用户确认专家阵容后，启动讨论并打开 SSE 流。"""
+    discussion = db.query(Discussion).filter(Discussion.id == discussion_id).first()
+    if not discussion:
+        raise HTTPException(status_code=404, detail="讨论不存在")
+    if discussion.status != "pending":
+        raise HTTPException(status_code=409, detail="讨论已开始或已结束")
+
+    # 更新状态
+    discussion.status = "in_progress"
+    db.commit()
+
+    # 获取参与者数据
+    participants_list = [
+        {
+            "id": p.id,
+            "role": p.role,
+            "name": p.name,
+            "title": p.title,
+            "stance": p.stance,
+            "color_code": p.color_code,
+            "order": p.order,
+        }
+        for p in discussion.participants
+    ]
+
+    db.close()
+
+    # 后台启动讨论引擎
+    asyncio.create_task(_run_discussion_in_background(
+        discussion_id=discussion_id,
+        topic=discussion.topic,
+        participants=participants_list,
+    ))
+
+    return {"status": "started", "discussion_id": discussion_id}
 
 
 # ============================================================
