@@ -139,6 +139,33 @@ body {
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* 呼吸灯 — thinking 状态专用（慢速柔和脉冲） */
+.guest-card--thinking .guest-card__avatar {
+  animation: breathe 2.5s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 4px rgba(245, 158, 11, 0.2); transform: scale(1); }
+  50% { box-shadow: 0 0 18px rgba(245, 158, 11, 0.4); transform: scale(1.05); }
+}
+
+.guest-card__breathe {
+  position: absolute;
+  top: -12px;
+  left: -12px;
+  right: -12px;
+  bottom: -12px;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: breathe-glow 2.5s ease-in-out infinite;
+}
+
+@keyframes breathe-glow {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.15); }
+}
+
+/* 发言光环 — speaking 状态专用（快速明亮） */
 .guest-card__glow {
   position: absolute;
   top: -8px;
@@ -188,13 +215,31 @@ body {
   transition: all 0.3s ease;
 }
 
-.guest-card__dot--pulse {
-  animation: dot-pulse 1s ease-in-out infinite;
+.guest-card__dot--active {
+  animation: dot-active 1.2s ease-in-out infinite;
+}
+
+.guest-card__dot--thinking {
+  animation: dot-breathe 2.5s ease-in-out infinite;
+}
+
+.guest-card__dot--speaking {
+  animation: dot-pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes dot-active {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.25); }
+}
+
+@keyframes dot-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.7; }
+  50% { transform: scale(1.35); opacity: 1; }
 }
 
 @keyframes dot-pulse {
   0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.3); }
+  50% { transform: scale(1.4); }
 }
 
 .guest-card__name {

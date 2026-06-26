@@ -1,27 +1,25 @@
 import { create } from "zustand";
 
 const useStudioStore = create((set, get) => ({
-  // ── 核心状态 ──
+  // ── 数据状态 ──
   discussionId: null,
   participants: [],
   messages: [],
-  typingMessage: null,
+  typingMessage: null,   // 正在流式生成中的消息
   consensus: { agreements: [], divergences: [] },
-  guestStatuses: {},
-  discussionStatus: "idle", // idle | starting | in_progress | completed
-  isStarting: false,
+  guestStatuses: {},     // { participantId: "idle"|"thinking"|"speaking" }
+  discussionStatus: "idle",
   topic: "",
   expertCount: 4,
-  round: 0,
 
-  // ── chunk 缓冲（用于平滑流式显示） ──
-  _chunkTimer: null,
+  // ── chunk 缓冲（打字机平滑化） ──
   _pendingContent: "",
+
+  // ── API ──
 
   setDiscussionId: (id) => set({ discussionId: id }),
   setTopic: (topic) => set({ topic }),
   setExpertCount: (count) => set({ expertCount: count }),
-  setRound: (round) => set({ round }),
 
   setParticipants: (participants) => {
     const statuses = {};
@@ -29,38 +27,34 @@ const useStudioStore = create((set, get) => ({
     set({ participants, guestStatuses: statuses, messages: [], typingMessage: null, _pendingContent: "" });
   },
 
-  setDiscussionStatus: (status) => set({
-    discussionStatus: status,
-    isStarting: status === "starting",
-  }),
+  setDiscussionStatus: (status) => set({ discussionStatus: status }),
 
+  /** 更新嘉宾状态（thinking / speaking / idle） */
   updateGuestStatus: (participantId, status) =>
     set((state) => ({
       guestStatuses: { ...state.guestStatuses, [participantId]: status },
-      activeSpeakerId: status === "speaking" ? participantId : state.activeSpeakerId,
     })),
 
-  /** 带缓冲的 typing 内容更新 — chunk 级平滑 */
+  /** 带缓冲的 typing 更新 — 遇标点或 30 字才刷新，不逐字蹦 */
   updateTypingContent: (data) => {
     const state = get();
-    const participant = state.participants.find((p) => p.id === data.participant_id);
-    if (!participant) return;
+    const p = state.participants.find((p) => p.id === data.participant_id);
+    if (!p) return;
 
     const chunk = data.content || "";
     const pending = state._pendingContent + chunk;
 
-    // 有标点或累积超过 30 字 → 立即刷新
     if (/[。.!?！？\n]/.test(chunk) || pending.length > 30) {
-      const existing = state.typingMessage;
-      const newContent = (existing?.participant_id === data.participant_id ? existing.content : "") + pending;
+      const tm = state.typingMessage;
+      const merged = (tm?.participant_id === data.participant_id ? tm.content : "") + pending;
       set({
         typingMessage: {
-          participant_id: participant.id,
-          participant_name: participant.name,
-          role: participant.role,
-          title: participant.title,
-          color_code: participant.color_code,
-          content: newContent,
+          participant_id: p.id,
+          participant_name: p.name,
+          role: p.role,
+          title: p.title,
+          color_code: p.color_code,
+          content: merged,
         },
         _pendingContent: "",
       });
@@ -69,35 +63,29 @@ const useStudioStore = create((set, get) => ({
     }
   },
 
-  /** 完成一条消息 */
+  /** 完成一条消息（is_final=true） */
   finalizeTyping: (data) =>
     set((state) => {
       const tm = state.typingMessage;
       if (!tm) return state;
-      const fullContent = tm.content + state._pendingContent;
-      const newMsg = {
-        id: data.message_id || Date.now(),
-        participant_id: tm.participant_id,
-        participant_name: tm.participant_name,
-        role: tm.role,
-        title: tm.title,
-        content: fullContent,
-        color_code: tm.color_code,
-        created_at: new Date().toISOString(),
-      };
+      const full = tm.content + state._pendingContent;
       return {
-        messages: [...state.messages, newMsg],
+        messages: [...state.messages, {
+          id: data.message_id || Date.now(),
+          participant_id: tm.participant_id,
+          participant_name: tm.participant_name,
+          role: tm.role,
+          title: tm.title,
+          content: full,
+          color_code: tm.color_code,
+          created_at: new Date().toISOString(),
+        }],
         typingMessage: null,
         _pendingContent: "",
       };
     }),
 
   updateConsensus: (consensus) => set({ consensus: { ...consensus } }),
-
-  addMessage: (msg) =>
-    set((state) => ({
-      messages: [...state.messages, { id: Date.now(), ...msg }],
-    })),
 
   resetDiscussion: () =>
     set({
@@ -107,7 +95,6 @@ const useStudioStore = create((set, get) => ({
       consensus: { agreements: [], divergences: [] },
       guestStatuses: {},
       discussionStatus: "idle",
-      round: 0,
       _pendingContent: "",
     }),
 }));

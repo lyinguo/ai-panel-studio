@@ -4,7 +4,7 @@ import GuestPanel from "../components/GuestPanel";
 import Transcript from "../components/Transcript";
 import ConsensusPanel from "../components/ConsensusPanel";
 import useStudioStore from "../stores/studioStore";
-import useDiscussion from "../hooks/useDiscussion";
+import { useDiscussionStream } from "../hooks/useDiscussionStream";
 
 const API = "http://localhost:8000";
 
@@ -20,47 +20,45 @@ function Studio() {
     consensus,
     guestStatuses,
     discussionStatus,
-    activeSpeakerId,
+    setDiscussionId,
+    setParticipants,
+    setDiscussionStatus,
     resetDiscussion,
   } = useStudioStore();
 
-  const { connectToDiscussion } = useDiscussion();
-
-  // 从 URL 加载已有讨论
+  // 1. 加载讨论元数据
   useEffect(() => {
     if (!id || loaded.current) return;
     loaded.current = true;
 
-    const load = async () => {
+    (async () => {
       try {
         const resp = await fetch(`${API}/api/discussions/${id}`);
         if (!resp.ok) { navigate("/"); return; }
         const data = await resp.json();
-        // 如果讨论还没开始，回到候场页
         if (data.status === "pending") { navigate(`/lobby/${id}`); return; }
-        connectToDiscussion(data);
+        setDiscussionId(data.id);
+        setParticipants(data.participants);
+        setDiscussionStatus(data.status === "completed" ? "completed" : "in_progress");
       } catch (e) {
-        console.error("加载讨论失败:", e);
         navigate("/");
       }
-    };
-    load();
+    })();
 
     return () => resetDiscussion();
   }, [id]);
 
+  // 2. SSE 连接（纯副作用，不返回值）
+  useDiscussionStream(id);
+
   return (
     <div className="studio">
-      {/* 返回按钮 */}
-      <button className="studio__back" onClick={() => navigate("/")}>
-        ← 返回列表
-      </button>
+      <button className="studio__back" onClick={() => navigate("/")}>← 返回列表</button>
 
       <GuestPanel
         participants={participants}
         guestStatuses={guestStatuses}
         discussionStatus={discussionStatus}
-        activeSpeakerId={activeSpeakerId}
       />
 
       <div className="studio__stage">
@@ -81,14 +79,11 @@ function Studio() {
             <span className="studio__msg-count">{messages.length} 条发言</span>
           </div>
         )}
-
         {discussionStatus === "completed" && (
           <div className="studio__status-bar studio__status-bar--done">
             <span>✓ 讨论已结束</span>
             <span className="studio__msg-count">{messages.length} 条发言</span>
-            <button className="studio-btn studio-btn--ghost" onClick={() => navigate("/")}>
-              返回列表
-            </button>
+            <button className="studio-btn studio-btn--ghost" onClick={() => navigate("/")}>返回列表</button>
           </div>
         )}
       </div>
