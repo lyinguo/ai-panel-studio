@@ -1,56 +1,52 @@
 import React from "react";
 
 const STATUS_CONFIG = {
-  idle: { label: "待机", color: "#666", pulse: false },
-  thinking: { label: "思考中", color: "#F0AD4E", pulse: true },
-  speaking: { label: "发言中", color: "#5CB85C", pulse: true },
+  idle: { label: "待机", color: "#6B7280" },
+  thinking: { label: "思考中", color: "#F59E0B" },
+  speaking: { label: "发言中", color: "#10B981" },
 };
 
-function GuestCard({ participant, status }) {
+function GuestCard({ participant, status, isActive }) {
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.idle;
+  const initial = participant.name.charAt(0);
 
   return (
-    <div
-      className={`guest-card ${status === "speaking" ? "guest-card--active" : ""}`}
-      style={{ borderLeftColor: participant.color_code }}
-    >
-      {/* 头像区 */}
+    <div className={`guest-card ${isActive ? "guest-card--active" : ""}`}>
+      {/* 光环层 */}
+      {isActive && (
+        <div
+          className="guest-card__glow"
+          style={{ background: `radial-gradient(circle, ${participant.color_code}44 0%, transparent 70%)` }}
+        />
+      )}
+
+      {/* 头像 */}
       <div
-        className="guest-card__avatar"
+        className={`guest-card__avatar ${status === "speaking" ? "guest-card__avatar--speaking" : ""}`}
         style={{ borderColor: participant.color_code }}
       >
-        <span style={{ color: participant.color_code }}>
-          {participant.name[0]}
+        <span className="guest-card__initial" style={{ color: participant.color_code }}>
+          {initial}
         </span>
-        {/* 状态指示器 */}
+        {/* 状态指示点 */}
         <span
-          className={`guest-card__indicator ${cfg.pulse ? "guest-card__indicator--pulse" : ""}`}
-          style={{ backgroundColor: cfg.color }}
+          className={`guest-card__dot ${status === "thinking" || status === "speaking" ? "guest-card__dot--pulse" : ""}`}
+          style={{ backgroundColor: cfg.color, boxShadow: `0 0 6px ${cfg.color}88` }}
         />
       </div>
 
-      {/* 信息区 */}
-      <div className="guest-card__info">
-        <div className="guest-card__name-row">
-          <span className="guest-card__role-tag" style={{ backgroundColor: participant.color_code + "22", color: participant.color_code }}>
-            {participant.role === "host" ? "主持人" : "专家"}
-          </span>
-          <span className="guest-card__name" style={{ color: participant.color_code }}>
-            {participant.name}
-          </span>
-        </div>
-        <div className="guest-card__title">{participant.title}</div>
-        <div className="guest-card__stance">{participant.stance}</div>
+      {/* 名称 */}
+      <div className="guest-card__name" style={{ color: isActive ? participant.color_code : "#e2e8f0" }}>
+        {participant.name}
       </div>
 
-      {/* 状态标签 */}
-      <div className="guest-card__status" style={{ color: cfg.color }}>
-        <span
-          className={`guest-card__status-dot ${cfg.pulse ? "guest-card__status-dot--pulse" : ""}`}
-          style={{ backgroundColor: cfg.color }}
-        />
-        {cfg.label}
+      {/* 角色 */}
+      <div className="guest-card__role">
+        {participant.role === "host" ? "主持人" : "专家"}
       </div>
+
+      {/* 状态条 */}
+      <div className="guest-card__status-bar" style={{ backgroundColor: cfg.color }} />
     </div>
   );
 }

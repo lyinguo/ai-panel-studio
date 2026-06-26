@@ -114,15 +114,18 @@ async def create_discussion(
     db.commit()
 
     # 5. 在后端启动讨论（不阻塞响应）
-    db.close()  # 避免 session 跨线程
+    discussion_id = discussion.id  # 在 close 前捕获 id
+    # 将带 ID 的参与者数据转为 dict 传给后台任务
+    participant_dicts = [p.model_dump() for p in participant_responses]
+    db.close()
     asyncio.create_task(_run_discussion_in_background(
-        discussion_id=discussion.id,
+        discussion_id=discussion_id,
         topic=body.topic,
-        participant_data=participants_data,
+        participants=participant_dicts,
     ))
 
     return CreateDiscussionResponse(
-        discussion_id=discussion.id,
+        discussion_id=discussion_id,
         participants=participant_responses,
     )
 
@@ -270,14 +273,14 @@ async def stream_events(
 async def _run_discussion_in_background(
     discussion_id: int,
     topic: str,
-    participant_data: list[dict],
+    participants: list[dict],
 ) -> None:
     """在后端运行完整的 AI 圆桌讨论流程。"""
     engine = DiscussionEngine()
     await engine.run_discussion(
         discussion_id=discussion_id,
         topic=topic,
-        participants=participant_data,
+        participants=participants,
         event_bus=event_bus,
         max_rounds=10,
     )

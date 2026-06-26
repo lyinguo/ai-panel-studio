@@ -26,11 +26,16 @@ class EventBus:
         self._lock = asyncio.Lock()
 
     async def publish(self, discussion_id: int, event: dict) -> None:
-        """向指定讨论发布一个事件。"""
+        """向指定讨论发布一个事件。
+
+        如果尚未有人订阅，自动创建队列避免事件丢失。
+        """
         async with self._lock:
             queue = self._queues.get(discussion_id)
-        if queue is not None:
-            await queue.put(event)
+            if queue is None:
+                queue = asyncio.Queue()
+                self._queues[discussion_id] = queue
+        await queue.put(event)
 
     def subscribe(self, discussion_id: int) -> asyncio.Queue:
         """订阅指定讨论的事件流，返回一个 asyncio.Queue。

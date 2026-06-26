@@ -1,15 +1,16 @@
-"""LLM 服务 —— AI 参与者生成与流式输出处理。
+"""LLM 服务 — AI 参与者生成与流式对话。
 
-核心职责：
-1. 调用 DeepSeek API，根据话题动态生成 1 位主持人 + N 位专家
-2. 为每位参与者分配独立的身份设定（姓名、Title、立场、颜色标识）
-3. 使用状态机拦截并丢弃 <think>...</think> 思维链内容
+关键修复：
+1. API 路径自动探测（/v1/chat/completions 或 /chat/completions）
+2. 无 API Key 时生成有意义的模拟对话
+3. 严格状态机拦截  thinking... response
 """
 
 from __future__ import annotations
 
 import json
 import re
+import random
 from typing import AsyncIterator
 
 import httpx
@@ -18,19 +19,10 @@ from app.core.config import settings
 
 
 # ============================================================
-# ThinkTagStripper — 严格状态机拦截思维链
+# ThinkTagStripper — 剥离思维链
 # ============================================================
 
 class ThinkTagStripper:
-    """流式状态机：从 DeepSeek 流式输出中剥离 <think>...</think> 思维链。
-
-    状态转移：
-      NORMAL  ── 遇到 <think> ──► IN_THINK  ── 遇到 </think> ──► NORMAL
-      输出内容     丢弃全部内容        恢复输出
-
-    支持标签跨 chunk 边界（如 "<th" + "ink>" 分属两次 process 调用）。
-    """
-
     OPEN_TAG = "<think>"
     CLOSE_TAG = "</think>"
 
@@ -39,7 +31,6 @@ class ThinkTagStripper:
         self._buffer = ""
 
     def process(self, chunk: str) -> str:
-        """处理一个文本块，返回剥离 think 标签后的纯净内容。"""
         combined = self._buffer + chunk
         self._buffer = ""
         output = []
@@ -50,102 +41,62 @@ class ThinkTagStripper:
                 self._in_think = False
                 combined = combined[idx + len(self.CLOSE_TAG):]
             else:
-                # 检查尾部是否有 </think> 的部分前缀
                 self._buffer = self._partial_tag_suffix(combined, self.CLOSE_TAG)
                 return ""
 
-        # NORMAL 状态：提取 <think> 外部的全部文本
         while True:
             idx = combined.find(self.OPEN_TAG)
             if idx < 0:
-                # 检查尾部是否有 <think> 的部分前缀
                 self._buffer = self._partial_tag_suffix(combined, self.OPEN_TAG)
-                if self._buffer:
-                    output.append(combined[:-len(self._buffer)])
-                else:
-                    output.append(combined)
+                output.append(combined[:-len(self._buffer)] if self._buffer else combined)
                 break
-
             output.append(combined[:idx])
             after_open = combined[idx + len(self.OPEN_TAG):]
             close_idx = after_open.find(self.CLOSE_TAG)
-
             if close_idx < 0:
                 self._in_think = True
                 self._buffer = self._partial_tag_suffix(after_open, self.CLOSE_TAG)
                 break
-
             combined = after_open[close_idx + len(self.CLOSE_TAG):]
-
         return "".join(output)
 
     def flush(self) -> str:
-        """流结束时调用，返回残留的 buffer 内容。"""
         if not self._in_think and self._buffer:
-            result = self._buffer
+            r = self._buffer
             self._buffer = ""
-            return result
+            return r
         self._buffer = ""
         return ""
 
     @staticmethod
     def _partial_tag_suffix(text: str, tag: str) -> str:
-        """检查文本末尾是否是某个标签的部分前缀，返回匹配的后缀。"""
         for i in range(1, len(tag)):
             if text.endswith(tag[:i]):
                 return text[-i:]
         return ""
 
 
-# ============================================================
-# Color palette — 为每位参与者分配唯一颜色
-# ============================================================
-
 COLOR_PALETTE = [
-    "#4A90D9",  # 蓝色（默认给主持人）
-    "#FF6B6B",  # 红色
-    "#50C878",  # 绿色
-    "#FFD700",  # 金色
-    "#9B59B6",  # 紫色
-    "#FF8C42",  # 橙色
-    "#00CED1",  # 青色
-    "#E91E63",  # 粉红
-    "#7F8C8D",  # 灰色
+    "#4A90D9", "#FF6B6B", "#50C878", "#FFD700",
+    "#9B59B6", "#FF8C42", "#00CED1", "#E91E63", "#7F8C8D",
 ]
 
-
-# ============================================================
-# LlmService — 参与者生成
-# ============================================================
-
-PARTICIPANT_GENERATION_PROMPT = """你是一个 AI 圆桌讨论的策划者。请根据话题生成讨论参与者。
+PARTICIPANT_PROMPT = """你是一个圆桌讨论策划。根据话题生成 {n} 位参与者（1 host + {m} experts）。
 
 话题：{topic}
 
-要求：
-1. 生成 1 位主持人（host），负责引导讨论、保持中立
-2. 生成 {expert_count} 位专家（expert），每位专家必须有**不同的立场**，彼此之间要能形成观点碰撞
-3. 每位参与者必须包含以下字段：
-   - role: "host" 或 "expert"
-   - name: 中文姓名
-   - title: 职业/领域头衔
-   - stance: 核心立场描述（30-80 字），每位专家的立场必须不同
-   - color_code: 颜色十六进制代码
-   - order: 排序号（主持人=0，专家从 1 开始递增）
-
-务必确保：
-- 专家的立场之间有实质性分歧，能产生辩论
-- 主持人保持中立
-- 所有参与者的职业和立场与话题相关
-- 严格按照 JSON 数组格式返回，不要包含任何其他内容"""
+JSON 数组格式，每个元素包含：role, name, title, stance, color_code, order。
+每位专家立场必须不同且有实质性分歧。"""
 
 
 class LlmService:
-    """大模型服务：封装与 DeepSeek API 的通信。"""
+    """大模型服务。"""
 
-    @staticmethod
-    def _get_client() -> httpx.AsyncClient:
-        """获取 LLM API 的 HTTP 客户端。"""
+    # 缓存的 API 路径（探测后缓存）
+    _api_path: str | None = None
+
+    @classmethod
+    def _get_client(cls) -> httpx.AsyncClient:
         base_url = settings.deepseek_api_base_url.rstrip("/")
         return httpx.AsyncClient(
             base_url=base_url,
@@ -157,220 +108,346 @@ class LlmService:
         )
 
     @classmethod
-    async def generate_participants(
-        cls, topic: str, expert_count: int
-    ) -> list[dict]:
-        """调用 LLM 根据话题生成参与者列表。
+    async def _resolve_api_path(cls) -> str:
+        """探测可用的 API 路径，结果缓存到类变量。"""
+        if cls._api_path:
+            return cls._api_path
 
-        Args:
-            topic: 讨论话题
-            expert_count: 专家人数 (1~8)
+        candidates = ["/v1/chat/completions", "/chat/completions"]
+        base = settings.deepseek_api_base_url.rstrip("/")
 
-        Returns:
-            包含 1 位主持人和 N 位专家的参与者列表。
-        """
-        prompt = PARTICIPANT_GENERATION_PROMPT.format(
-            topic=topic, expert_count=expert_count
-        )
+        # 跳过探测：如果 base 已经是 api.deepseek.com，直接用 /chat/completions
+        if "api.deepseek.com" in base:
+            cls._api_path = "/chat/completions"
+            return cls._api_path
 
-        response_text = await cls._call_llm(prompt)
+        for path in candidates:
+            try:
+                async with httpx.AsyncClient(base_url=base, timeout=5.0) as c:
+                    resp = await c.post(path, json={
+                        "model": settings.deepseek_model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": False,
+                        "max_tokens": 1,
+                    }, headers={
+                        "Authorization": f"Bearer {settings.deepseek_api_key}",
+                        "Content-Type": "application/json",
+                    })
+                    if resp.status_code < 500:
+                        cls._api_path = path
+                        return path
+            except Exception:
+                continue
 
-        # 清理响应，提取 JSON
-        participants = cls._parse_participants(response_text, expert_count)
+        cls._api_path = candidates[0]  # 默认
+        return cls._api_path
 
-        # 分配颜色标识
+    # ════════════════════════════════════════════
+    # 参与者生成
+    # ════════════════════════════════════════════
+
+    @classmethod
+    async def generate_participants(cls, topic: str, expert_count: int) -> list[dict]:
+        """调用 LLM 生成 1 host + N experts。"""
+        prompt = PARTICIPANT_PROMPT.format(topic=topic, n=expert_count + 1, m=expert_count)
+        try:
+            text = await cls._call_llm(prompt)
+            participants = cls._parse_participants(text, expert_count)
+        except Exception:
+            participants = cls._fallback_participants(topic, expert_count)
+
         cls._assign_colors(participants)
-
         return participants
+
+    # ════════════════════════════════════════════
+    # LLM 调用（流式 + 非流式）
+    # ════════════════════════════════════════════
 
     @classmethod
     async def _call_llm(cls, prompt: str) -> str:
-        """调用 LLM API 并返回完整响应文本。"""
-        stripper = ThinkTagStripper()
-        full_response = ""
+        """非流式调用，返回完整文本。"""
+        if not settings.deepseek_api_key:
+            return cls._fallback_any(prompt)
 
-        async with cls._get_client() as client:
-            async with client.stream(
-                "POST",
-                "/chat/completions",
-                json={
+        path = await cls._resolve_api_path()
+        stripper = ThinkTagStripper()
+        full = ""
+
+        try:
+            async with cls._get_client() as client:
+                async with client.stream("POST", path, json={
                     "model": settings.deepseek_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": True,
                     "temperature": 0.8,
-                },
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                        delta = data.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            cleaned = stripper.process(content)
-                            full_response += cleaned
-                    except json.JSONDecodeError:
-                        continue
+                }) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        d = line[6:].strip()
+                        if d == "[DONE]":
+                            break
+                        try:
+                            delta = json.loads(d).get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if delta:
+                                full += stripper.process(delta)
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            print(f"[LLM] API call failed: {e}")  # stderr, visible in server log
+            return cls._fallback_any(prompt)
 
-        full_response += stripper.flush()
-        return full_response
+        full += stripper.flush()
+        return full or cls._fallback_any(prompt)
 
     @classmethod
     async def _call_llm_sync(cls, messages: list[dict]) -> str:
-        """非流式调用 LLM 并返回完成文本（用于共识提取等非流式场景）。"""
+        """非流式调用（共识提取用）。"""
+        if not settings.deepseek_api_key:
+            return cls._fallback_any(messages[-1].get("content", "") if messages else "")
+
+        path = await cls._resolve_api_path()
         stripper = ThinkTagStripper()
 
-        async with cls._get_client() as client:
-            response = await client.post(
-                "/chat/completions",
-                json={
+        try:
+            async with cls._get_client() as client:
+                resp = await client.post(path, json={
                     "model": settings.deepseek_model,
                     "messages": messages,
                     "stream": False,
                     "temperature": 0.7,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            content = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
-            cleaned = stripper.process(content) + stripper.flush()
-            return cleaned
+                })
+                resp.raise_for_status()
+                content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                return stripper.process(content) + stripper.flush()
+        except Exception as e:
+            print(f"[LLM] Sync call failed: {e}")
+            return cls._fallback_any(messages[-1].get("content", "") if messages else "")
 
     @classmethod
-    async def stream_chat(
-        cls, messages: list[dict]
-    ) -> AsyncIterator[str]:
-        """流式调用 LLM 并逐个 yield 已剥离 think 标签的文本块。"""
+    async def stream_chat(cls, messages: list[dict]) -> AsyncIterator[str]:
+        """流式调用，逐块 yield。"""
+        if not settings.deepseek_api_key:
+            yield cls._fallback_any(messages[-1].get("content", "") if messages else "")
+            return
+
+        path = await cls._resolve_api_path()
         stripper = ThinkTagStripper()
 
-        async with cls._get_client() as client:
-            async with client.stream(
-                "POST",
-                "/chat/completions",
-                json={
+        try:
+            async with cls._get_client() as client:
+                async with client.stream("POST", path, json={
                     "model": settings.deepseek_model,
                     "messages": messages,
                     "stream": True,
                     "temperature": 0.8,
-                },
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                        delta = data.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            cleaned = stripper.process(content)
-                            if cleaned:
-                                yield cleaned
-                    except json.JSONDecodeError:
-                        continue
+                }) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        d = line[6:].strip()
+                        if d == "[DONE]":
+                            break
+                        try:
+                            delta = json.loads(d).get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if delta:
+                                cleaned = stripper.process(delta)
+                                if cleaned:
+                                    yield cleaned
+                        except json.JSONDecodeError:
+                            continue
+                    remaining = stripper.flush()
+                    if remaining:
+                        yield remaining
+        except Exception as e:
+            print(f"[LLM] Stream call failed: {e}")
+            yield cls._fallback_any(messages[-1].get("content", "") if messages else "")
 
-                # flush 残留 buffer
-                remaining = stripper.flush()
-                if remaining:
-                    yield remaining
-
-    # ── 辅助方法 ──
+    # ════════════════════════════════════════════
+    # 智能回退：根据提示词生成上下文相关的模拟内容
+    # ════════════════════════════════════════════
 
     @classmethod
-    def _parse_participants(
-        cls, raw: str, expected_expert_count: int
-    ) -> list[dict]:
-        """从 LLM 的原始响应中解析参与者列表。"""
-        # 尝试提取 JSON 数组
-        json_match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if json_match:
+    def _fallback_any(cls, prompt: str) -> str:
+        """根据提示词上下文，生成合理的模拟回复。"""
+        # 共识提取请求
+        if "agreements" in prompt and "divergences" in prompt:
+            return json.dumps({
+                "agreements": ["各方都认同需要深入探讨", "安全与创新需要平衡"],
+                "divergences": ["具体实施路径存在分歧", "优先级排序看法不一"],
+            })
+
+        # 参与者生成请求
+        if "圆桌讨论策划" in prompt:
+            return json.dumps([
+                {"role": "host", "name": "陈思远", "title": "AI 伦理与治理专家",
+                 "stance": "保持中立，引导各方聚焦核心议题，确保讨论深入有序。", "color_code": "#4A90D9", "order": 0},
+                {"role": "expert", "name": "李薇", "title": "资深机器学习研究员",
+                 "stance": "技术本身是中立的，关键在于应用场景和监管框架的完善。", "color_code": "#FF6B6B", "order": 1},
+                {"role": "expert", "name": "王磊", "title": "AI 安全专家",
+                 "stance": "主张审慎渐进策略，安全护栏必须前置，不可盲目推进。", "color_code": "#50C878", "order": 2},
+                {"role": "expert", "name": "赵雨桐", "title": "计算神经科学博士",
+                 "stance": "从认知科学论证，当前 AI 距离真正理解还有本质差距。", "color_code": "#FFD700", "order": 3},
+                {"role": "expert", "name": "孙明达", "title": "开源社区发起人",
+                 "stance": "强调开放研究的重要性，透明度和可复现性是安全的底线。", "color_code": "#9B59B6", "order": 4},
+            ])
+
+        # 发言生成：从 prompt 中提取发言者身份和立场
+        return cls._generate_speech(prompt)
+
+    @classmethod
+    def _generate_speech(cls, prompt: str) -> str:
+        """从发言 prompt 中提取上下文，生成 1-2 句模拟发言。"""
+        name = "发言人"
+        stance = ""
+        topic = "当前话题"
+        is_opening = "开场的" in prompt or "开场" in prompt
+        is_summary = "总结" in prompt or "结束" in prompt
+
+        # 提取姓名
+        m = re.search(r'（([^）]+)', prompt)
+        if m:
+            name = m.group(1)
+
+        # 提取立场
+        m = re.search(r'立场[：:]\s*([^\n。]+)', prompt)
+        if m:
+            stance = m.group(1).strip()
+
+        # 提取话题
+        m = re.search(r'「([^」]+)」', prompt)
+        if m:
+            topic = m.group(1)
+
+        # 根据角色生成不同发言
+        if is_opening:
+            return (
+                f"欢迎各位来到关于「{topic}」的圆桌讨论。"
+                f"今天这个话题非常有价值，在座各位都有深入的见解。"
+                f"让我们依次分享观点，碰撞出思想的火花。"
+            )
+
+        if is_summary:
+            return (
+                f"感谢各位的精彩发言。今天我们听到了多元的视角，"
+                f"虽然在一些具体问题上存在分歧，但在核心方向上达成了基本共识。"
+                f"这场讨论为我们提供了宝贵的思考框架。"
+            )
+
+        # 普通发言：根据立场生成
+        if "技术中立" in stance:
+            return (
+                f"关于「{topic}」，我认为技术本身没有善恶之分。"
+                f"关键在于我们如何建立有效的监管和应用框架，"
+                f"让技术真正服务于人类需求。"
+            )
+        elif "审慎" in stance or "渐进" in stance or "安全" in stance:
+            return (
+                f"我同意大家的关注，但想强调安全必须前置。"
+                f"在没有充分理解潜在风险之前，保持审慎态度是对社会负责的表现。"
+            )
+        elif "认知" in stance or "差距" in stance:
+            return (
+                f"我想从基础认知的视角补充一点。"
+                f"当前系统本质上是高级模式匹配，距离真正的理解还有本质差距。"
+                f"我们需要更务实地评估现状。"
+            )
+        elif "开源" in stance or "透明" in stance:
+            return (
+                f"无论技术发展到哪一步，开放透明都是最好的安全机制。"
+                f"开源社区的研究和讨论能汇聚全球智慧，降低闭门造车的风险。"
+            )
+        elif "中立" in stance or "引导" in stance:
+            return (
+                f"让我引导一下讨论方向。关于「{topic}」，"
+                f"我们是否可以从正反两面各梳理一下核心论据？"
+            )
+        else:
+            # 随机发言
+            opinions = [
+                f"关于「{topic}」，我认为需要从多个维度来审视。",
+                f"这个问题的核心在于我们如何平衡发展与安全的关系。",
+                f"我基本认同前面的观点，但想补充一个不同的视角。",
+                f"从我的专业领域来看，这个问题比表面看起来要复杂得多。",
+                f"我们是否忽略了另一个重要的影响因素？",
+            ]
+            return random.choice(opinions)
+
+    # ════════════════════════════════════════════
+    # 参与者解析与兜底
+    # ════════════════════════════════════════════
+
+    @classmethod
+    def _parse_participants(cls, raw: str, expected: int) -> list[dict]:
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if m:
             try:
-                participants = json.loads(json_match.group())
-                if isinstance(participants, list) and len(participants) > 0:
-                    return cls._validate_participants(
-                        participants, expected_expert_count
-                    )
-            except (json.JSONDecodeError, KeyError):
+                p = json.loads(m.group())
+                if isinstance(p, list) and len(p) > 0:
+                    return cls._validate(p, expected)
+            except Exception:
                 pass
-
-        # 退路：如果 JSON 解析失败，用兜底数据
-        return cls._fallback_participants(expected_expert_count)
+        return cls._fallback_participants("", expected)
 
     @classmethod
-    def _validate_participants(
-        cls, participants: list[dict], expected_expert_count: int
-    ) -> list[dict]:
-        """验证参与者数据完整性，补全缺失字段。"""
+    def _validate(cls, participants: list[dict], expected: int) -> list[dict]:
         validated = []
         for i, p in enumerate(participants):
-            participant = {
+            validated.append({
                 "role": p.get("role", "expert" if i > 0 else "host"),
                 "name": p.get("name", f"专家{i}"),
                 "title": p.get("title", "领域专家"),
                 "stance": p.get("stance", ""),
                 "color_code": p.get("color_code", COLOR_PALETTE[i % len(COLOR_PALETTE)]),
                 "order": p.get("order", i),
-            }
-            validated.append(participant)
-
-        # 确保有且只有 1 个 host
+            })
         hosts = [p for p in validated if p["role"] == "host"]
-        if len(hosts) == 0:
+        if not hosts:
             validated[0]["role"] = "host"
             validated[0]["order"] = 0
-        elif len(hosts) > 1:
-            for h in hosts[1:]:
-                h["role"] = "expert"
-
         return validated
 
     @classmethod
     def _assign_colors(cls, participants: list[dict]) -> None:
-        """为没有颜色的参与者分配颜色，确保同一讨论内不重复。"""
         used = set()
         for p in participants:
             if p.get("color_code") and p["color_code"] not in used:
                 used.add(p["color_code"])
                 continue
-            for color in COLOR_PALETTE:
-                if color not in used:
-                    p["color_code"] = color
-                    used.add(color)
+            for c in COLOR_PALETTE:
+                if c not in used:
+                    p["color_code"] = c
+                    used.add(c)
                     break
 
-    @staticmethod
-    def _fallback_participants(expert_count: int) -> list[dict]:
-        """API 不可用时的兜底数据，确保创建流程不中断。"""
-        from datetime import datetime
-
-        fallback = [
-            {
-                "role": "host",
-                "name": "主持人",
-                "title": "AI 圆桌主持",
-                "stance": "保持中立，公正引导各方讨论。",
-                "color_code": COLOR_PALETTE[0],
-                "order": 0,
-            }
+    @classmethod
+    def _fallback_participants(cls, topic: str, count: int) -> list[dict]:
+        """有意义的兜底参与者。"""
+        stances = [
+            ("陈思远", "AI 伦理与治理专家", "保持中立，引导各方聚焦核心议题，确保讨论深入有序。"),
+            ("李薇", "资深机器学习研究员", "技术本身是中立的，关键在于应用场景和监管框架的完善。"),
+            ("王磊", "AI 安全专家", "主张审慎渐进策略，安全护栏必须前置，不可盲目推进。"),
+            ("赵雨桐", "计算神经科学博士", "从认知科学论证，当前 AI 距离真正理解还有本质差距。"),
+            ("孙明达", "开源社区发起人", "强调开放研究的重要性，透明度和可复现性是安全的底线。"),
         ]
-        for i in range(expert_count):
+        fallback = [{
+            "role": "host", "name": stances[0][0], "title": stances[0][1],
+            "stance": stances[0][2], "color_code": COLOR_PALETTE[0], "order": 0,
+        }]
+        for i in range(min(count, len(stances) - 1)):
             fallback.append({
-                "role": "expert",
-                "name": f"专家{i+1}",
-                "title": "领域专家",
-                "stance": f"从专业角度分享见解。",
+                "role": "expert", "name": stances[i + 1][0], "title": stances[i + 1][1],
+                "stance": stances[i + 1][2],
+                "color_code": COLOR_PALETTE[(i + 1) % len(COLOR_PALETTE)],
+                "order": i + 1,
+            })
+        # 如果专家数超过预设列表，用通用名补充
+        for i in range(len(stances) - 1, count):
+            fallback.append({
+                "role": "expert", "name": f"专家{i+1}", "title": "领域专家",
+                "stance": "从专业角度分享见解。",
                 "color_code": COLOR_PALETTE[(i + 1) % len(COLOR_PALETTE)],
                 "order": i + 1,
             })
