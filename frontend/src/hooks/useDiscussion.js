@@ -18,6 +18,7 @@ export default function useDiscussion() {
   const discussionIdRef = useRef(null);
 
   const {
+    discussionStatus,
     setDiscussionId,
     setDiscussionStatus,
     setParticipants,
@@ -31,6 +32,12 @@ export default function useDiscussion() {
   /** 创建讨论并连接 SSE */
   const startDiscussion = useCallback(
     async (topic, expertCount = 4) => {
+      // 防连点：已经在进行中则忽略
+      const status = discussionStatus;
+      if (status === "starting" || status === "in_progress") return;
+
+      setDiscussionStatus("starting");
+
       // 1. POST 创建讨论
       let discussionId;
       try {

@@ -8,7 +8,8 @@ const useStudioStore = create((set, get) => ({
   typingMessage: null,
   consensus: { agreements: [], divergences: [] },
   guestStatuses: {},
-  discussionStatus: "idle",
+  discussionStatus: "idle", // idle | starting | in_progress | completed
+  isStarting: false,
   topic: "",
   expertCount: 4,
   round: 0,
@@ -28,7 +29,10 @@ const useStudioStore = create((set, get) => ({
     set({ participants, guestStatuses: statuses, messages: [], typingMessage: null, _pendingContent: "" });
   },
 
-  setDiscussionStatus: (status) => set({ discussionStatus: status }),
+  setDiscussionStatus: (status) => set({
+    discussionStatus: status,
+    isStarting: status === "starting",
+  }),
 
   updateGuestStatus: (participantId, status) =>
     set((state) => ({

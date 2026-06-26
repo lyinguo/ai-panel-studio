@@ -1,10 +1,10 @@
 """讨论引擎 —— 发言调度、Prompt 组装、完整讨论流编排。
 
 核心原则：
-1. 严禁硬编码轮询逻辑（A→B→C→A），全程由 AI 自主决策发言顺序
+1. 坚决不轮询，但确保每位专家都有公平的发言机会
 2. 每次发言限制 1-2 句
 3. 周期性提炼共识与分歧
-4. 所有事件通过 EventBus 推送到 SSE
+4. 主持人控制节奏，讨论到达上限时自然结束
 """
 
 from __future__ import annotations
@@ -17,91 +17,67 @@ from app.services.event_bus import EventBus
 from app.services.llm_service import LlmService
 
 
-# ============================================================
-# 调度引擎
-# ============================================================
-
 class DiscussionEngine:
-    """讨论引擎：负责发言调度与 Prompt 组装。
+    """讨论引擎：确保公平发言 + 主持人节奏控制。"""
 
-    发言调度机制：
-    - 首次发言始终由主持人发起
-    - 后续每次发言由 LLM 根据对话上下文自主决定谁最适合接话
-    - 同一个人可以连续发言（模拟辩论中的抢话/补充）
-    - 主持人可以在任何时候介入引导
-    """
-
-    # ── 公共方法（被测试直接调用） ──
+    # ── 公开测试方法 ──
 
     async def select_next_speaker(
         self,
         participants: list[dict],
         context: dict | None = None,
     ) -> int:
-        """基于对话上下文选择下一位发言者的 participant_id。
+        """公平选择下一位发言者。
 
-        调度逻辑（非轮询）：
-        1. 无历史发言 → 返回主持人（id=1 或 role=host）
-        2. 有历史发言 → 从最近 3 条消息中统计已发言者，
-           优先选择尚未发言或发言次数最少的参与者
-        3. 20% 概率允许刚发言的人继续补充（模拟抢话）
-
-        Args:
-            participants: 参与者列表
-            context: 对话上下文，包含 last_speaker_id, round, history 等
-
-        Returns:
-            被选中发言者的 participant_id
+        调度策略（非轮询，但确保公平）：
+        1. round=0 → 主持人开场
+        2. 还有专家从未发言 → 优先从未发言者中选
+        3. 正常轮次 → 选择发言次数最少的参与者（从最少的前 50% 随机）
+        4. 10% 概率允许刚发言的非主持人继续补充（模拟抢话）
         """
         ctx = context or {}
         last_id = ctx.get("last_speaker_id")
         history = ctx.get("history", [])
         _round = ctx.get("round", 0)
 
-        # 第一轮：主持人开场
+        # 第 0 轮：主持人开场
         if _round == 0 or last_id is None:
-            host = next(p for p in participants if p["role"] == "host")
-            return host["id"]
+            return next(p for p in participants if p["role"] == "host")["id"]
 
-        # 有 20% 概率允许同一个人连续发言（抢话/补充）
-        if history and random.random() < 0.20:
-            last_speaker = next(
-                (p for p in participants if p["id"] == last_id), None
-            )
-            if last_speaker and last_speaker["role"] != "host":
-                return last_speaker["id"]
-
-        # 其余情况：选择发言次数最少的参与者
-        speaker_counts: dict[int, int] = {}
-        for p in participants:
-            speaker_counts[p["id"]] = 0
-        for msg in history[-10:]:  # 只看最近 10 条
+        # 统计每个人的发言次数
+        speaker_counts: dict[int, int] = {p["id"]: 0 for p in participants}
+        for msg in history:
             pid = msg.get("participant_id") if isinstance(msg, dict) else None
             if pid in speaker_counts:
                 speaker_counts[pid] += 1
 
-        # 按发言次数升序排列
-        sorted_ids = sorted(speaker_counts, key=lambda x: speaker_counts[x])
-        # 在前 50% 中随机选一个（保证公平但非确定性）
-        top_half = sorted_ids[:max(2, len(sorted_ids) // 2 + 1)]
-        choice = random.choice(top_half)
+        expert_ids = [p["id"] for p in participants if p["role"] == "expert"]
+
+        # 阶段 1：有专家还没发过言 → 强制给机会
+        zero_speakers = [eid for eid in expert_ids if speaker_counts.get(eid, 0) == 0]
+        if zero_speakers:
+            return random.choice(zero_speakers)
+
+        # 阶段 2：正常选择 — 发言最少者优先
+        sorted_by_count = sorted(speaker_counts, key=lambda x: speaker_counts[x])
+        pool_size = max(2, len(sorted_by_count) // 2 + 1)
+        pool = sorted_by_count[:pool_size]
+        choice = random.choice(pool)
+
+        # 10% 概率：同一个非主持人继续补充（抢话）
+        if (
+            random.random() < 0.10
+            and choice == last_id
+            and any(p["id"] == choice and p["role"] != "host" for p in participants)
+        ):
+            pass  # 允许同一个人继续
 
         return choice
 
     def build_system_prompt(
-        self,
-        topic: str,
-        participants: list[dict],
+        self, topic: str, participants: list[dict]
     ) -> str:
-        """组装发送给 LLM 的系统指令，包含严格的行为约束。
-
-        Args:
-            topic: 讨论话题
-            participants: 参与者列表（含 role/name/title/stance）
-
-        Returns:
-            完整的系统指令字符串
-        """
+        """组装系统指令。"""
         host = next(p for p in participants if p["role"] == "host")
         experts = [p for p in participants if p["role"] == "expert"]
 
@@ -125,10 +101,9 @@ class DiscussionEngine:
             "2. 欢迎观点碰撞，可以从你自己的立场出发反驳他人。",
             "3. 不允许机械重复自己或他人的观点。",
             "4. 不要一味附和，独立思考是讨论的核心价值。",
-            "5. 主持人负责引导流程，但专家应当主动发表见解。",
-            "6. 专家可以抢话或补充他人观点，这是正常的辩论行为。",
+            "5. 主持人负责引导流程，确保每位专家都有发言机会。",
+            "6. 讨论接近上限时，主持人应引导总结并结束讨论。",
         ])
-
         return "\n".join(lines)
 
     # ── 完整讨论编排 ──
@@ -141,25 +116,7 @@ class DiscussionEngine:
         event_bus: EventBus,
         max_rounds: int = 10,
     ) -> None:
-        """编排一场完整的 AI 圆桌讨论。
-
-        流程：
-        1. 主持人开场（system prompt + 开场白）
-        2. 循环 N 轮，每轮：
-           a. 选下一位发言者 → 发送 guest_status_change (thinking)
-           b. 调用 LLM 流式生成发言 → 发送 message_chunk
-           c. 发送 guest_status_change (speaking→idle)
-           d. 每 3 轮提取一次共识 → 发送 consensus_update
-        3. 主持人总结 → 讨论结束
-
-        Args:
-            discussion_id: 讨论 ID
-            topic: 讨论话题
-            participants: 参与者列表
-            event_bus: 事件总线
-            max_rounds: 最大讨论轮次
-        """
-        # 更新讨论状态为进行中
+        """编排一场完整的 AI 圆桌讨论，确保公平发言 + 节奏控制。"""
         await event_bus.publish(discussion_id, {
             "type": "discussion_status",
             "status": "in_progress",
@@ -168,11 +125,13 @@ class DiscussionEngine:
 
         system_prompt = self.build_system_prompt(topic, participants)
         host = next(p for p in participants if p["role"] == "host")
-
-        # 构建参与者映射
+        experts = [p for p in participants if p["role"] == "expert"]
         participant_map = {p["id"]: p for p in participants}
 
-        # 对话历史
+        # 计算合理的讨论轮数：每位专家至少 2 次 + 主持人 3 次
+        suggested_rounds = len(experts) * 2 + 3
+        total_rounds = min(max_rounds, suggested_rounds)
+
         messages = [
             {"role": "system", "content": system_prompt},
             {
@@ -188,9 +147,10 @@ class DiscussionEngine:
             "last_speaker_id": None,
             "round": 0,
             "history": [],
+            "total_rounds": total_rounds,
         }
 
-        # ── 第一轮：主持人开场 ──
+        # ── 主持人开场 ──
         await self._speak(
             discussion_id=discussion_id,
             speaker_id=host["id"],
@@ -203,26 +163,49 @@ class DiscussionEngine:
         )
 
         # ── 循环讨论 ──
-        for round_num in range(1, max_rounds + 1):
+        for round_num in range(1, total_rounds + 1):
             context["round"] = round_num
 
-            # 选择下一位发言者
             next_id = await self.select_next_speaker(participants, context)
             speaker = participant_map[next_id]
             context["last_speaker_id"] = next_id
 
-            # 生成发言
             speaker_type = "主持人" if speaker["role"] == "host" else f"专家{speaker['name']}"
-            user_prompt = (
-                f"现在请{speaker_type}（{speaker['name']}，{speaker['title']}）发言。"
-                f"你的立场：{speaker['stance']}\n\n"
-                f"1. 控制在 1-2 句。\n"
-                f"2. 结合你自己的立场发表见解。\n"
-                f"3. 可以反驳或补充前面其他人的观点。\n"
-                f"4. 不允许机械重复。"
-            )
 
-            messages.append({"role": "user", "content": user_prompt})
+            # 不同的轮次使用不同的 prompt 风格
+            rounds_left = total_rounds - round_num
+
+            if rounds_left <= 1:
+                # 最后一轮前，主持人催促
+                prompt = (
+                    f"现在请{speaker_type}（{speaker['name']}，{speaker['title']}）发言。"
+                    f"你的立场：{speaker['stance']}\n\n"
+                    f"1. 控制在 1-2 句。\n"
+                    f"2. 讨论即将结束，请做最后的观点陈述。\n"
+                    f"3. 可以简要反驳或补充之前的观点。"
+                )
+            elif round_num <= 3:
+                # 前几轮：深入探讨
+                prompt = (
+                    f"现在请{speaker_type}（{speaker['name']}，{speaker['title']}）发言。"
+                    f"你的立场：{speaker['stance']}\n\n"
+                    f"1. 控制在 1-2 句。\n"
+                    f"2. 结合你自己的立场发表核心见解。\n"
+                    f"3. 可以反驳或补充前面其他人的观点。\n"
+                    f"4. 不允许机械重复。"
+                )
+            else:
+                # 中段：观点碰撞
+                prompt = (
+                    f"现在请{speaker_type}（{speaker['name']}，{speaker['title']}）发言。"
+                    f"你的立场：{speaker['stance']}\n\n"
+                    f"1. 控制在 1-2 句。\n"
+                    f"2. 请对前面的观点做出回应或反驳。\n"
+                    f"3. 提出你独特的见解。\n"
+                    f"4. 不允许机械重复。"
+                )
+
+            messages.append({"role": "user", "content": prompt})
 
             await self._speak(
                 discussion_id=discussion_id,
@@ -236,24 +219,24 @@ class DiscussionEngine:
             )
 
             # 每 3 轮提取一次共识
-            if round_num % 3 == 0:
+            if round_num % 3 == 0 or round_num == total_rounds:
                 await self._extract_and_push_consensus(
                     discussion_id=discussion_id,
                     topic=topic,
                     messages=messages,
                     event_bus=event_bus,
+                    is_final=(round_num == total_rounds),
                 )
 
-            # 检查是否自然结束（主持人发出总结信号）
             if context.get("should_end"):
                 break
 
-        # ── 主持人总结（由 LLM 生成） ──
+        # ── 主持人总结 ──
         messages.append({
             "role": "user",
             "content": (
-                f"讨论即将结束，请以主持人「{host['name']}」的身份"
-                f"做一个简短的总结发言。控制在 2-3 句。"
+                f"讨论已接近尾声，请以主持人「{host['name']}」的身份"
+                f"做一个简短的总结发言，概括各方的核心观点。控制在 2-3 句。"
             ),
         })
 
@@ -297,10 +280,9 @@ class DiscussionEngine:
         context: dict,
         is_opening: bool = False,
     ) -> None:
-        """让一位参与者发言，流式输出文本。"""
+        """让一位参与者发言，流式输出。"""
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        # guest_status_change → thinking
         await event_bus.publish(discussion_id, {
             "event": "guest_status_change",
             "data": {
@@ -310,10 +292,7 @@ class DiscussionEngine:
             },
         })
 
-        # 收集完整发言内容
         full_content = ""
-
-        # message_chunk 流式输出
         chunk_index = 0
         async for chunk in LlmService.stream_chat(messages):
             full_content += chunk
@@ -328,10 +307,8 @@ class DiscussionEngine:
             })
             chunk_index += 1
 
-        # 模拟 message_id
         message_id = hash((discussion_id, speaker_id, timestamp)) % (10**9)
 
-        # message_chunk → final
         await event_bus.publish(discussion_id, {
             "event": "message_chunk",
             "data": {
@@ -343,7 +320,6 @@ class DiscussionEngine:
             },
         })
 
-        # 将发言加入消息历史
         messages.append({
             "role": "assistant",
             "content": full_content,
@@ -355,7 +331,6 @@ class DiscussionEngine:
             "content": full_content,
         })
 
-        # guest_status_change → idle
         await event_bus.publish(discussion_id, {
             "event": "guest_status_change",
             "data": {
@@ -373,7 +348,7 @@ class DiscussionEngine:
         event_bus: EventBus,
         is_final: bool = False,
     ) -> None:
-        """调用 LLM 提炼当前共识与分歧，并推送到 SSE。"""
+        """提炼共识与分歧。"""
         consensus_prompt = (
             f"基于以上关于「{topic}」的讨论内容，请提炼出：\n"
             "1. agreements: 当前参与者已达成的共识要点（JSON 字符串数组）\n"
@@ -382,20 +357,15 @@ class DiscussionEngine:
             "请严格以 JSON 格式返回，不要包含其他内容。"
         )
 
-        extract_messages = messages + [
-            {"role": "user", "content": consensus_prompt}
-        ]
-
         try:
-            response = await LlmService._call_llm_sync(extract_messages)
+            response = await LlmService._call_llm_sync(
+                messages + [{"role": "user", "content": consensus_prompt}]
+            )
 
-            # 尝试解析 JSON
             import re
-
             json_match = re.search(
                 r'\{[^{}]*"agreements"[^{}]*"divergences"[^{}]*\}',
-                response,
-                re.DOTALL,
+                response, re.DOTALL,
             )
             if json_match:
                 consensus = json.loads(json_match.group())
@@ -411,5 +381,4 @@ class DiscussionEngine:
                 },
             })
         except Exception:
-            # 共识提取失败时不阻断流程
             pass

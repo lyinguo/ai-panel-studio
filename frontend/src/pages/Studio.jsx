@@ -13,6 +13,7 @@ function Studio() {
     consensus,
     guestStatuses,
     discussionStatus,
+    isStarting,
     activeSpeakerId,
     topic,
     expertCount,
@@ -73,9 +74,9 @@ function Studio() {
             <button
               className="studio-btn studio-btn--primary"
               onClick={() => startDiscussion(topic.trim(), expertCount)}
-              disabled={!topic.trim()}
+              disabled={!topic.trim() || isStarting}
             >
-              ▶ 开始讨论
+              {isStarting ? "⏳ 连接中..." : "▶ 开始讨论"}
             </button>
           </div>
         )}
